@@ -1,16 +1,16 @@
 {
-  "name": "@tintinweb/pi-subagents",
+  "name": "@elithecho/pi-subagents",
   "version": "0.7.3",
   "description": "A pi extension extension that brings smart Claude Code-style autonomous sub-agents to pi.",
-  "author": "tintinweb",
+  "author": "elithecho",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tintinweb/pi-subagents.git"
+    "url": "https://github.com/elithecho/pi-subagents.git"
   },
-  "homepage": "https://github.com/tintinweb/pi-subagents#readme",
+  "homepage": "https://github.com/elithecho/pi-subagents#readme",
   "bugs": {
-    "url": "https://github.com/tintinweb/pi-subagents/issues"
+    "url": "https://github.com/elithecho/pi-subagents/issues"
   },
   "keywords": [
     "pi-package",
@@ -49,7 +49,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "video": "https://github.com/tintinweb/pi-subagents/raw/master/media/demo.mp4",
-    "image": "https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png"
+    "video": "https://github.com/elithecho/pi-subagents/raw/master/media/demo.mp4",
+    "image": "https://github.com/elithecho/pi-subagents/raw/master/media/screenshot.png"
   }
 }
