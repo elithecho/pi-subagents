@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Install
 
 ```bash
-pi install npm:@elithecho/pi-subagents
+pi install git:https://github.com/elithecho/pi-subagents.git
 ```
 
 Or load directly for development:
