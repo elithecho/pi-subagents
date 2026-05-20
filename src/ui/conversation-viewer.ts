@@ -182,6 +182,9 @@ export class ConversationViewer implements Component {
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
 
+    const normalizeTabs = (line: string) => line.replace(/\t/g, "   ");
+    const safeLine = (line: string) => truncateToWidth(normalizeTabs(line), width);
+
     const th = this.theme;
     const messages = this.session.messages;
     const lines: string[] = [];
@@ -220,7 +223,7 @@ export class ConversationViewer implements Component {
           }
         }
         for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
+          lines.push(safeLine(th.fg("muted", `  [Tool: ${name}]`)));
         }
       } else if (msg.role === "toolResult") {
         const text = extractText(msg.content);
@@ -234,7 +237,7 @@ export class ConversationViewer implements Component {
       } else if ((msg as any).role === "bashExecution") {
         const bash = msg as any;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width));
+        lines.push(safeLine(th.fg("muted", `  $ ${bash.command}`)));
         if (bash.output?.trim()) {
           const out = bash.output.length > 500
             ? bash.output.slice(0, 500) + "... (truncated)"
@@ -253,9 +256,9 @@ export class ConversationViewer implements Component {
     if (this.record.status === "running" && this.activity) {
       const act = describeActivity(this.activity.activeTools, this.activity.responseText);
       lines.push("");
-      lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
+      lines.push(safeLine(th.fg("accent", "▍ ") + th.fg("dim", act)));
     }
 
-    return lines.map(l => truncateToWidth(l, width));
+    return lines.map(safeLine);
   }
 }

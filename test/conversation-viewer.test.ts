@@ -69,6 +69,12 @@ function assertAllLinesFit(lines: string[], width: number) {
   }
 }
 
+function assertNoTabs(lines: string[]) {
+  for (let i = 0; i < lines.length; i++) {
+    expect(lines[i], `line ${i} contains a tab: ${JSON.stringify(lines[i])}`).not.toContain("\t");
+  }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -305,6 +311,20 @@ describe("ConversationViewer", () => {
         mockTui(30, w), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
       );
       assertAllLinesFit(callBuildContentLines(viewer, w), w);
+    });
+
+    it("normalizes tabs before returning content lines", () => {
+      const w = 80;
+      const messages = [
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text: "30\t    def initialize(account, type:, data: {})" }] },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, w), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+      const lines = callBuildContentLines(viewer, w);
+
+      assertAllLinesFit(lines, w);
+      assertNoTabs(lines);
     });
 
     it("clamps overwidth lines that also contain ANSI codes", () => {
