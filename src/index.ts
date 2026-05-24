@@ -471,30 +471,18 @@ export default function (pi: ExtensionAPI) {
     manager.clearCompleted();
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
 
-    // UX escape hatch: when the main chat is idle and the editor is blank,
-    // double-tap Escape to stop any background/queued subagents. We listen to
-    // raw input instead of registerShortcut() because this is a double-key
-    // gesture and should not consume the first Escape (which remains pi's
-    // normal cancel/interrupt key).
+    // UX escape hatch: Ctrl+C already clears the editor; when the editor is
+    // blank and the main chat is idle, reuse it to stop background/queued
+    // subagents instead. Non-blank Ctrl+C remains pi's normal clear action.
     unsubscribeTerminalInput?.();
-    let lastEscapeAt = 0;
     unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
-      const isEscape = data === "\u001b" || data.toLowerCase?.() === "escape" || data.toLowerCase?.() === "esc";
-      if (!isEscape) {
-        lastEscapeAt = 0;
-        return undefined;
-      }
-
-      const now = Date.now();
-      const isDoubleTap = now - lastEscapeAt < 450;
-      lastEscapeAt = now;
-
-      if (!isDoubleTap) return undefined;
+      const isCtrlC = data === "\u0003";
+      if (!isCtrlC) return undefined;
       if (!ctx.isIdle()) return undefined;
       if (ctx.ui.getEditorText().trim().length > 0) return undefined;
       if (!manager.hasRunning()) return undefined;
 
-      const stopped = stopAllAgents("double_escape");
+      const stopped = stopAllAgents("blank_ctrl_c");
       ctx.ui.notify(`Stopped ${stopped} background agent${stopped === 1 ? "" : "s"}.`, "warning");
       return { consume: true };
     });
@@ -537,7 +525,7 @@ export default function (pi: ExtensionAPI) {
   // Live widget: show running agents above editor
   const widget = new AgentWidget(manager, agentActivity);
 
-  function stopAllAgents(reason: "menu" | "double_escape" | "shutdown" = "menu"): number {
+  function stopAllAgents(reason: "menu" | "blank_ctrl_c" | "shutdown" = "menu"): number {
     const active = manager.listAgents()
       .filter(a => a.status === "running" || a.status === "queued")
       .map(record => ({ record, wasQueued: record.status === "queued" }));

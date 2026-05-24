@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause)
-- **Panic stop** — with an empty editor while pi is idle, double-tap `Esc` to stop all running/queued background agents immediately; also available in `/agents → Settings`
+- **Panic stop** — with an empty editor while pi is idle, press `Ctrl+C` to stop all running/queued background agents immediately; also available in `/agents → Settings`
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context
@@ -293,7 +293,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
-To stop background work immediately, double-tap `Esc` while pi is idle and the editor is empty, or use `/agents → Settings → Stop all running/queued agents`.
+To stop background work immediately, press `Ctrl+C` while pi is idle and the editor is empty, or use `/agents → Settings → Stop all running/queued agents`.
 
 Foreground agents bypass the queue — they block the parent anyway.
 
