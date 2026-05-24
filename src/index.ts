@@ -463,14 +463,46 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  let unsubscribeTerminalInput: (() => void) | undefined;
+
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted();
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
+
+    // UX escape hatch: when the main chat is idle and the editor is blank,
+    // double-tap Escape to stop any background/queued subagents. We listen to
+    // raw input instead of registerShortcut() because this is a double-key
+    // gesture and should not consume the first Escape (which remains pi's
+    // normal cancel/interrupt key).
+    unsubscribeTerminalInput?.();
+    let lastEscapeAt = 0;
+    unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
+      const isEscape = data === "\u001b" || data.toLowerCase?.() === "escape" || data.toLowerCase?.() === "esc";
+      if (!isEscape) {
+        lastEscapeAt = 0;
+        return undefined;
+      }
+
+      const now = Date.now();
+      const isDoubleTap = now - lastEscapeAt < 450;
+      lastEscapeAt = now;
+
+      if (!isDoubleTap) return undefined;
+      if (!ctx.isIdle()) return undefined;
+      if (ctx.ui.getEditorText().trim().length > 0) return undefined;
+      if (!manager.hasRunning()) return undefined;
+
+      const stopped = stopAllAgents("double_escape");
+      ctx.ui.notify(`Stopped ${stopped} background agent${stopped === 1 ? "" : "s"}.`, "warning");
+      return { consume: true };
+    });
   });
 
   pi.on("session_before_switch", () => {
+    unsubscribeTerminalInput?.();
+    unsubscribeTerminalInput = undefined;
     manager.clearCompleted();
     scheduler.stop();
   });
@@ -493,6 +525,8 @@ export default function (pi: ExtensionAPI) {
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
+    unsubscribeTerminalInput?.();
+    unsubscribeTerminalInput = undefined;
     scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
@@ -502,6 +536,24 @@ export default function (pi: ExtensionAPI) {
 
   // Live widget: show running agents above editor
   const widget = new AgentWidget(manager, agentActivity);
+
+  function stopAllAgents(reason: "menu" | "double_escape" | "shutdown" = "menu"): number {
+    const active = manager.listAgents()
+      .filter(a => a.status === "running" || a.status === "queued")
+      .map(record => ({ record, wasQueued: record.status === "queued" }));
+    const count = manager.abortAll();
+    for (const { record, wasQueued } of active) {
+      // Running agents will emit their terminal lifecycle event when runAgent()
+      // settles; queued agents never start, so surface their stop immediately.
+      if (reason !== "shutdown" && wasQueued) {
+        pi.events.emit("subagents:failed", { ...buildEventData(record), status: "stopped", error: "Stopped by user" });
+      }
+      agentActivity.delete(record.id);
+      widget.markFinished(record.id);
+    }
+    widget.update();
+    return count;
+  }
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -1794,6 +1846,7 @@ ${systemPrompt}
       `Grace turns (current: ${getGraceTurns()})`,
       `Join mode (current: ${getDefaultJoinMode()})`,
       `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
+      ...(manager.hasRunning() ? ["Stop all running/queued agents"] : []),
     ]);
     if (!choice) return;
 
@@ -1843,6 +1896,13 @@ ${systemPrompt}
         const mode = val.split(" ")[0] as JoinMode;
         setDefaultJoinMode(mode);
         notifyApplied(ctx, `Default join mode set to ${mode}`);
+      }
+    } else if (choice === "Stop all running/queued agents") {
+      const active = manager.listAgents().filter(a => a.status === "running" || a.status === "queued");
+      const confirmed = await ctx.ui.confirm("Stop agents", `Stop ${active.length} running/queued background agent${active.length === 1 ? "" : "s"}?`);
+      if (confirmed) {
+        const stopped = stopAllAgents("menu");
+        ctx.ui.notify(`Stopped ${stopped} background agent${stopped === 1 ? "" : "s"}.`, "warning");
       }
     } else if (choice.startsWith("Scheduling")) {
       const val = await ctx.ui.select(

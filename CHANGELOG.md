@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Panic stop for runaway background agents.** When pi is idle and the editor is blank, double-tap `Esc` to stop every running/queued background subagent. The same action is available from `/agents → Settings → Stop all running/queued agents`.
+
 ### Changed
 - **Removed `max_turns` from the `Agent` tool schema** so the parent model can no longer choose ad hoc per-call turn limits. By default, subagents are unlimited; turn limits must come from agent frontmatter or subagent settings.
 
