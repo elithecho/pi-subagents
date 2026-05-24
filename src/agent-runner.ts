@@ -26,8 +26,11 @@ import type { SubagentType, ThinkingLevel } from "./types.js";
 /** Names of tools registered by this extension that subagents must NOT inherit. */
 const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
 
+/** Hardcoded default max turns when no settings or per-agent override is present. */
+const HARDCODED_DEFAULT_MAX_TURNS = 60;
+
 /** Default max turns. undefined = unlimited (no turn limit). */
-let defaultMaxTurns: number | undefined;
+let defaultMaxTurns: number | undefined = HARDCODED_DEFAULT_MAX_TURNS;
 
 /** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
 export function normalizeMaxTurns(n: number | undefined): number | undefined {

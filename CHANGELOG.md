@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Default max turns is now 60** when no per-agent, tool-call, global, or project setting is provided. Users can still set `defaultMaxTurns: 0` in subagent settings, enter `0` in `/agents` → Settings, or use `max_turns: 0` in agent frontmatter for unlimited turns.
+
 ### Fixed
 - **`.pi/subagent-schedules/` is no longer created in every working directory.** `ScheduleStore`'s constructor previously ran `mkdirSync` unconditionally, so any session with scheduling enabled left an empty `.pi/subagent-schedules/` dir behind even when nothing was ever scheduled. Directory creation is now lazy — deferred to a new private `ensureDir()` invoked at the top of `withLock`, so the dir (and its `<sessionId>.json`) appear only when a job is actually persisted. Additionally, `update`/`remove` now short-circuit on an unknown id (in-memory `jobs.has(id)` check) before taking the lock, so no-op mutations never touch disk. Read-only use (`list`/`get`/`hasName`) and constructing the store never create the dir. Pre-existing leftover dirs are not cleaned up — remove them manually.
 

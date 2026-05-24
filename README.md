@@ -201,7 +201,7 @@ All fields are optional — sensible defaults for everything.
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh |
-| `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
+| `max_turns` | default limit | Max agentic turns before graceful shutdown. Omit to use the configured default (60 unless changed); set `0` for unlimited |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
@@ -223,7 +223,7 @@ Launch a sub-agent.
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh |
-| `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
+| `max_turns` | number | no | Max agentic turns. Omit to use the default limit (60 unless configured); set `0` in agent config/settings for unlimited |
 | `run_in_background` | boolean | no | Run without blocking |
 | `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
@@ -317,7 +317,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, join mode `smart`).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns `60`, grace turns `5`, join mode `smart`).
 
 **Example — global defaults for a beefy machine:**
 
