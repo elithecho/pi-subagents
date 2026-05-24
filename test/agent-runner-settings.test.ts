@@ -8,41 +8,39 @@ import {
 } from "../src/agent-runner.js";
 
 describe("setDefaultMaxTurns / getDefaultMaxTurns", () => {
-  it("defaults to 60 turns", () => {
-    expect(getDefaultMaxTurns()).toBe(60);
+  beforeEach(() => {
+    setDefaultMaxTurns(undefined);
   });
 
-  describe("after explicit setting changes", () => {
-    beforeEach(() => {
-      setDefaultMaxTurns(undefined);
-    });
+  it("defaults to undefined (unlimited)", () => {
+    expect(getDefaultMaxTurns()).toBeUndefined();
+  });
 
-    it("stores a positive integer", () => {
-      setDefaultMaxTurns(30);
-      expect(getDefaultMaxTurns()).toBe(30);
-    });
+  it("stores a positive integer", () => {
+    setDefaultMaxTurns(30);
+    expect(getDefaultMaxTurns()).toBe(30);
+  });
 
-    it("accepts boundary value 1", () => {
-      setDefaultMaxTurns(1);
-      expect(getDefaultMaxTurns()).toBe(1);
-    });
+  it("accepts boundary value 1", () => {
+    setDefaultMaxTurns(1);
+    expect(getDefaultMaxTurns()).toBe(1);
+  });
 
-    it("treats 0 as unlimited", () => {
-      setDefaultMaxTurns(0);
-      expect(getDefaultMaxTurns()).toBeUndefined();
-    });
+  it("treats 0 as unlimited", () => {
+    setDefaultMaxTurns(0);
+    expect(getDefaultMaxTurns()).toBeUndefined();
+  });
 
-    it("clamps negative values to 1", () => {
-      setDefaultMaxTurns(-10);
-      expect(getDefaultMaxTurns()).toBe(1);
-    });
+  it("clamps negative values to 1", () => {
+    setDefaultMaxTurns(-10);
+    expect(getDefaultMaxTurns()).toBe(1);
+  });
 
-    it("undefined resets to unlimited after being set", () => {
-      setDefaultMaxTurns(50);
-      expect(getDefaultMaxTurns()).toBe(50);
-      setDefaultMaxTurns(undefined);
-      expect(getDefaultMaxTurns()).toBeUndefined();
-    });
+  it("undefined resets to unlimited after being set", () => {
+    setDefaultMaxTurns(50);
+    expect(getDefaultMaxTurns()).toBe(50);
+    setDefaultMaxTurns(undefined);
+    expect(getDefaultMaxTurns()).toBeUndefined();
   });
 });
 

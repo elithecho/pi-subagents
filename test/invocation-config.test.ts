@@ -33,7 +33,6 @@ describe("resolveAgentInvocationConfig", () => {
       {
         model: "provider/param-model",
         thinking: "minimal",
-        max_turns: 1,
         inherit_context: true,
         run_in_background: true,
         isolated: true,
@@ -51,11 +50,10 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.isolation).toBe("worktree");
   });
 
-  it("uses tool-call params when no agent config is available", () => {
+  it("uses tool-call params for caller-controlled fields when no agent config is available", () => {
     const resolved = resolveAgentInvocationConfig(undefined, {
       model: "provider/param-model",
       thinking: "minimal",
-      max_turns: 3,
       inherit_context: true,
       run_in_background: true,
       isolated: true,
@@ -65,7 +63,7 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.modelInput).toBe("provider/param-model");
     expect(resolved.modelFromParams).toBe(true);
     expect(resolved.thinking).toBe("minimal");
-    expect(resolved.maxTurns).toBe(3);
+    expect(resolved.maxTurns).toBeUndefined();
     expect(resolved.inheritContext).toBe(true);
     expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
