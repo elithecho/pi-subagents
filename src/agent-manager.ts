@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { Model } from "@mariozechner/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { logger } from "./logger.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -116,6 +117,7 @@ export class AgentManager {
   ): string {
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
+    const conversationId = ctx.sessionManager?.getSessionId?.() ?? undefined;
     const record: AgentRecord = {
       id,
       type,
@@ -126,6 +128,7 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
+      conversationId,
       invocation: options.invocation,
     };
     this.agents.set(id, record);
@@ -385,6 +388,12 @@ export class AgentManager {
       this.queue = this.queue.filter(q => q.id !== id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      logger.warn("agent-manager", "Agent cancelled from queue", {
+        conversationId: record.conversationId,
+        agentId: record.id,
+        agentType: record.type,
+        description: record.description,
+      });
       return true;
     }
 
@@ -430,17 +439,24 @@ export class AgentManager {
   /** Abort all running and queued agents immediately. */
   abortAll(): number {
     let count = 0;
+    // Log queued-only agents (running agents log in stopRunningRecord)
     // Clear queued agents first
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        logger.warn("agent-manager", "Agent cancelled from queue", {
+          conversationId: record.conversationId,
+          agentId: record.id,
+          agentType: record.type,
+          description: record.description,
+        });
         count++;
       }
     }
     this.queue = [];
-    // Abort running agents
+    // Abort running agents — stopRunningRecord handles its own logging
     for (const record of this.agents.values()) {
       if (record.status === "running") {
         this.stopRunningRecord(record);
@@ -461,6 +477,12 @@ export class AgentManager {
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
+    logger.warn("agent-manager", "Running agent stopped", {
+      conversationId: record.conversationId,
+      agentId: record.id,
+      agentType: record.type,
+      description: record.description,
+    });
   }
 
   /** Wait for all running and queued agents to complete (including queued ones). */

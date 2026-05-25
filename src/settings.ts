@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { logger } from "./logger.js";
 import type { JoinMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -103,7 +104,10 @@ function readSettingsFile(path: string): SubagentsSettings {
     return sanitize(JSON.parse(readFileSync(path, "utf-8")));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.warn(`[pi-subagents] Ignoring malformed settings at ${path}: ${reason}`);
+    logger.warn("settings", "Ignoring malformed settings file", {
+      path,
+      error: reason,
+    });
     return {};
   }
 }

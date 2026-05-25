@@ -22,6 +22,7 @@ import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { logger } from "./logger.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
@@ -449,9 +450,9 @@ export default function (pi: ExtensionAPI) {
   const scheduler = new SubagentScheduler();
 
   function startScheduler(ctx: ExtensionContext) {
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (!sessionId) return;  // sessionId not yet available — try again on next event
     try {
-      const sessionId = ctx.sessionManager?.getSessionId?.();
-      if (!sessionId) return;  // sessionId not yet available — try again on next event
       const path = resolveStorePath(ctx.cwd, sessionId);
       const store = new ScheduleStore(path);
       scheduler.start(pi, ctx, manager, store);
@@ -459,7 +460,10 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       // Scheduling is non-essential — log and move on so the rest of the
       // extension keeps working if e.g. .pi/ is unwritable.
-      console.warn("[pi-subagents] Failed to start scheduler:", err);
+      logger.warn("index", "Failed to start scheduler", {
+        conversationId: sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -491,10 +495,15 @@ export default function (pi: ExtensionAPI) {
     unsubSpawnRpc();
     unsubStopRpc();
     unsubPingRpc();
+    const sessionId = currentCtx?.sessionManager?.getSessionId?.();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
     scheduler.stop();
-    manager.abortAll();
+    const aborted = manager.abortAll();
+    logger.info("index", "Session shutdown — subagents cleaned up", {
+      conversationId: sessionId,
+      agentsAborted: aborted,
+    });
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     manager.dispose();

@@ -261,21 +261,31 @@ describe("settings persistence", () => {
       }
     });
 
-    it("warns to console.warn when an existing file is malformed", () => {
-      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    it("warns via structured logger when an existing file is malformed", () => {
+      const chunks: string[] = [];
+      const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string) => {
+        chunks.push(chunk);
+        return true;
+      });
       mkdirSync(join(projectDir, ".pi"), { recursive: true });
       writeFileSync(projectFile(), "not valid json {{{");
       try {
         expect(loadSettings(projectDir)).toEqual({});
-        expect(spy).toHaveBeenCalledTimes(1);
-        expect(String(spy.mock.calls[0][0])).toMatch(/Ignoring malformed settings/);
+        expect(spy).toHaveBeenCalled();
+        const lastCall = chunks[chunks.length - 1] ?? "";
+        const parsed = JSON.parse(lastCall.trim());
+        expect(parsed.level).toBe("warn");
+        expect(parsed.module).toBe("settings");
+        expect(parsed.message).toBe("Ignoring malformed settings file");
+        expect(typeof parsed.path).toBe("string");
+        expect(parsed.error).toBeTypeOf("string");
       } finally {
         spy.mockRestore();
       }
     });
 
-    it("does NOT warn when a file is simply missing", () => {
-      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    it("does NOT log when a file is simply missing", () => {
+      const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       try {
         expect(loadSettings(projectDir)).toEqual({});
         expect(spy).not.toHaveBeenCalled();

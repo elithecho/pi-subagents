@@ -94,6 +94,8 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
+  /** Conversation/session ID from the Pi host, captured at spawn time for correlation. */
+  conversationId?: string;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
 }
