@@ -222,6 +222,54 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(disposeSpy).toHaveBeenCalledOnce();
   });
 
+  it("abort() immediately aborts the session and active bash, not just the manager signal", () => {
+    manager = new AgentManager();
+    const session = { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(session);
+      return new Promise(() => {});
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+
+    expect(manager.abort(id)).toBe(true);
+    expect(session.abortBash).toHaveBeenCalledOnce();
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(manager.getRecord(id)!.abortController!.signal.aborted).toBe(true);
+    expect(manager.getRecord(id)!.status).toBe("stopped");
+  });
+
+  it("abortAll() immediately aborts sessions and active bash for running records", () => {
+    manager = new AgentManager();
+    const sessions = [
+      { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() },
+      { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() },
+    ];
+    let nextSession = 0;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(sessions[nextSession++]);
+      return new Promise(() => {});
+    });
+
+    manager.spawn(mockPi, mockCtx, "general-purpose", "one", {
+      description: "one",
+      isBackground: true,
+    });
+    manager.spawn(mockPi, mockCtx, "general-purpose", "two", {
+      description: "two",
+      isBackground: true,
+    });
+
+    expect(manager.abortAll()).toBe(2);
+    for (const session of sessions) {
+      expect(session.abortBash).toHaveBeenCalledOnce();
+      expect(session.abort).toHaveBeenCalledOnce();
+    }
+  });
+
   it("clearCompleted removes error and stopped records", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockRejectedValue(new Error("boom"));

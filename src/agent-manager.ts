@@ -389,9 +389,7 @@ export class AgentManager {
     }
 
     if (record.status !== "running") return false;
-    record.abortController?.abort();
-    record.status = "stopped";
-    record.completedAt = Date.now();
+    this.stopRunningRecord(record);
     return true;
   }
 
@@ -445,13 +443,24 @@ export class AgentManager {
     // Abort running agents
     for (const record of this.agents.values()) {
       if (record.status === "running") {
-        record.abortController?.abort();
-        record.status = "stopped";
-        record.completedAt = Date.now();
+        this.stopRunningRecord(record);
         count++;
       }
     }
     return count;
+  }
+
+  private stopRunningRecord(record: AgentRecord): void {
+    // Abort the high-level agent loop and any active bash command. The
+    // AbortController alone eventually reaches session.abort(), but it does not
+    // cover session-owned bash execution; calling both makes user stop requests
+    // take effect immediately instead of waiting for the current tool/process to
+    // finish naturally.
+    try { record.session?.abortBash(); } catch { /* best-effort stop */ }
+    try { void record.session?.abort(); } catch { /* best-effort stop */ }
+    record.abortController?.abort();
+    record.status = "stopped";
+    record.completedAt = Date.now();
   }
 
   /** Wait for all running and queued agents to complete (including queued ones). */

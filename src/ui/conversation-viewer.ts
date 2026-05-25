@@ -33,6 +33,7 @@ export class ConversationViewer implements Component {
     private activity: AgentActivity | undefined,
     private theme: Theme,
     private done: (result: undefined) => void,
+    private onStop?: (record: AgentRecord) => boolean,
   ) {
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
@@ -44,6 +45,12 @@ export class ConversationViewer implements Component {
     if (matchesKey(data, "escape") || matchesKey(data, "q")) {
       this.closed = true;
       this.done(undefined);
+      return;
+    }
+
+    if ((matchesKey(data, "x") || data === "X") && this.canStop()) {
+      this.onStop?.(this.record);
+      this.tui.requestRender();
       return;
     }
 
@@ -141,7 +148,8 @@ export class ConversationViewer implements Component {
       ? "100%"
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+    const stopHint = this.canStop() ? " · x stop" : "";
+    const footerRight = th.fg("dim", `↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close${stopHint}`);
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);
@@ -170,6 +178,10 @@ export class ConversationViewer implements Component {
 
   private chromeLines(): number {
     return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0);
+  }
+
+  private canStop(): boolean {
+    return this.record.status === "running" || this.record.status === "queued";
   }
 
   private invocationLine(): string | undefined {

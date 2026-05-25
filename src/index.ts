@@ -463,34 +463,14 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  let unsubscribeTerminalInput: (() => void) | undefined;
-
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted();
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
-
-    // UX escape hatch: Ctrl+C already clears the editor; when the editor is
-    // blank and the main chat is idle, reuse it to stop background/queued
-    // subagents instead. Non-blank Ctrl+C remains pi's normal clear action.
-    unsubscribeTerminalInput?.();
-    unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
-      const isCtrlC = data === "\u0003";
-      if (!isCtrlC) return undefined;
-      if (!ctx.isIdle()) return undefined;
-      if (ctx.ui.getEditorText().trim().length > 0) return undefined;
-      if (!manager.hasRunning()) return undefined;
-
-      const stopped = stopAllAgents("blank_ctrl_c");
-      ctx.ui.notify(`Stopped ${stopped} background agent${stopped === 1 ? "" : "s"}.`, "warning");
-      return { consume: true };
-    });
   });
 
   pi.on("session_before_switch", () => {
-    unsubscribeTerminalInput?.();
-    unsubscribeTerminalInput = undefined;
     manager.clearCompleted();
     scheduler.stop();
   });
@@ -513,8 +493,6 @@ export default function (pi: ExtensionAPI) {
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
-    unsubscribeTerminalInput?.();
-    unsubscribeTerminalInput = undefined;
     scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
@@ -525,7 +503,7 @@ export default function (pi: ExtensionAPI) {
   // Live widget: show running agents above editor
   const widget = new AgentWidget(manager, agentActivity);
 
-  function stopAllAgents(reason: "menu" | "blank_ctrl_c" | "shutdown" = "menu"): number {
+  function stopAllAgents(reason: "menu" | "shutdown" = "menu"): number {
     const active = manager.listAgents()
       .filter(a => a.status === "running" || a.status === "queued")
       .map(record => ({ record, wasQueued: record.status === "queued" }));
@@ -1456,7 +1434,16 @@ Guidelines:
 
     await ctx.ui.custom<undefined>(
       (tui, theme, _keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done);
+        return new ConversationViewer(tui, session, record, activity, theme, done, (r) => {
+          const stopped = manager.abort(r.id);
+          if (stopped) {
+            agentActivity.delete(r.id);
+            widget.markFinished(r.id);
+            widget.update();
+            ctx.ui.notify(`Stopped agent ${r.id}.`, "warning");
+          }
+          return stopped;
+        });
       },
       {
         overlay: true,
