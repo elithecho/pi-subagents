@@ -495,15 +495,10 @@ export default function (pi: ExtensionAPI) {
     unsubSpawnRpc();
     unsubStopRpc();
     unsubPingRpc();
-    const sessionId = currentCtx?.sessionManager?.getSessionId?.();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
     scheduler.stop();
-    const aborted = manager.abortAll();
-    logger.info("index", "Session shutdown — subagents cleaned up", {
-      conversationId: sessionId,
-      agentsAborted: aborted,
-    });
+    manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     manager.dispose();

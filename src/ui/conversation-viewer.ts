@@ -42,7 +42,17 @@ export class ConversationViewer implements Component {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape") || matchesKey(data, "q")) {
+    if (matchesKey(data, "escape")) {
+      if (this.canStop()) {
+        this.onStop?.(this.record);
+        this.tui.requestRender();
+      }
+      this.closed = true;
+      this.done(undefined);
+      return;
+    }
+
+    if (matchesKey(data, "q")) {
       this.closed = true;
       this.done(undefined);
       return;
@@ -148,8 +158,8 @@ export class ConversationViewer implements Component {
       ? "100%"
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const stopHint = this.canStop() ? " · x stop" : "";
-    const footerRight = th.fg("dim", `↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close${stopHint}`);
+    const stopHint = this.canStop() ? " · Esc/x stop · q close" : " · Esc/q close";
+    const footerRight = th.fg("dim", `↑↓ scroll · PgUp/PgDn or Shift+↑↓${stopHint}`);
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);

@@ -82,6 +82,53 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer", () => {
+  describe("input handling", () => {
+    it("stops and closes a running agent on Escape", () => {
+      const done = vi.fn();
+      const onStop = vi.fn(() => true);
+      const tui = mockTui();
+      const record = mockRecord({ status: "running" });
+      const viewer = new ConversationViewer(
+        tui, mockSession([]), record, undefined, ansiTheme(), done, onStop,
+      );
+
+      viewer.handleInput("\u001b");
+
+      expect(onStop).toHaveBeenCalledOnce();
+      expect(onStop).toHaveBeenCalledWith(record);
+      expect(done).toHaveBeenCalledOnce();
+      expect(tui.requestRender).toHaveBeenCalledOnce();
+    });
+
+    it("closes without stopping a running agent on q", () => {
+      const done = vi.fn();
+      const onStop = vi.fn(() => true);
+      const record = mockRecord({ status: "running" });
+      const viewer = new ConversationViewer(
+        mockTui(), mockSession([]), record, undefined, ansiTheme(), done, onStop,
+      );
+
+      viewer.handleInput("q");
+
+      expect(onStop).not.toHaveBeenCalled();
+      expect(done).toHaveBeenCalledOnce();
+    });
+
+    it("does not call stop on Escape for a completed agent", () => {
+      const done = vi.fn();
+      const onStop = vi.fn(() => true);
+      const record = mockRecord({ status: "completed" });
+      const viewer = new ConversationViewer(
+        mockTui(), mockSession([]), record, undefined, ansiTheme(), done, onStop,
+      );
+
+      viewer.handleInput("\u001b");
+
+      expect(onStop).not.toHaveBeenCalled();
+      expect(done).toHaveBeenCalledOnce();
+    });
+  });
+
   describe("render width safety", () => {
     const widths = [40, 80, 120, 216];
 
