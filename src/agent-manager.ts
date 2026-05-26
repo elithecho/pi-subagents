@@ -133,6 +133,20 @@ export class AgentManager {
     };
     this.agents.set(id, record);
 
+    if (options.signal) {
+      const onParentAbort = () => this.abort(id);
+      options.signal.addEventListener("abort", onParentAbort, { once: true });
+      record.parentAbortDetach = () => options.signal!.removeEventListener("abort", onParentAbort);
+      if (options.signal.aborted) {
+        record.parentAbortDetach();
+        record.parentAbortDetach = undefined;
+        record.abortController?.abort();
+        record.status = "stopped";
+        record.completedAt = Date.now();
+        return id;
+      }
+    }
+
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
     if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
@@ -146,6 +160,8 @@ export class AgentManager {
     try {
       this.startAgent(id, record, args);
     } catch (err) {
+      record.parentAbortDetach?.();
+      record.parentAbortDetach = undefined;
       this.agents.delete(id);
       throw err;
     }
@@ -175,14 +191,10 @@ export class AgentManager {
     if (options.isBackground) this.runningBackground++;
     this.onStart?.(record);
 
-    // Wire parent abort signal to stop the subagent when the parent is interrupted
-    let detachParentSignal: (() => void) | undefined;
-    if (options.signal) {
-      const onParentAbort = () => this.abort(id);
-      options.signal.addEventListener("abort", onParentAbort, { once: true });
-      detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
-    }
-    const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
+    const detach = () => {
+      record.parentAbortDetach?.();
+      record.parentAbortDetach = undefined;
+    };
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -304,6 +316,8 @@ export class AgentManager {
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
+        record.parentAbortDetach?.();
+        record.parentAbortDetach = undefined;
         this.onComplete?.(record);
       }
     }
@@ -386,6 +400,9 @@ export class AgentManager {
     // Remove from queue if queued
     if (record.status === "queued") {
       this.queue = this.queue.filter(q => q.id !== id);
+      record.parentAbortDetach?.();
+      record.parentAbortDetach = undefined;
+      record.abortController?.abort();
       record.status = "stopped";
       record.completedAt = Date.now();
       logger.warn("agent-manager", "Agent cancelled from queue", {
@@ -444,6 +461,9 @@ export class AgentManager {
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
       if (record) {
+        record.parentAbortDetach?.();
+        record.parentAbortDetach = undefined;
+        record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
         logger.warn("agent-manager", "Agent cancelled from queue", {
@@ -472,6 +492,8 @@ export class AgentManager {
     // cover session-owned bash execution; calling both makes user stop requests
     // take effect immediately instead of waiting for the current tool/process to
     // finish naturally.
+    record.parentAbortDetach?.();
+    record.parentAbortDetach = undefined;
     try { record.session?.abortBash(); } catch { /* best-effort stop */ }
     try { void record.session?.abort(); } catch { /* best-effort stop */ }
     record.abortController?.abort();
@@ -505,6 +527,8 @@ export class AgentManager {
     // Clear queue
     this.queue = [];
     for (const record of this.agents.values()) {
+      record.parentAbortDetach?.();
+      record.parentAbortDetach = undefined;
       record.session?.dispose();
     }
     this.agents.clear();

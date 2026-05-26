@@ -242,6 +242,56 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(manager.getRecord(id)!.status).toBe("stopped");
   });
 
+  it("parent abort signal stops a running background agent immediately", () => {
+    manager = new AgentManager();
+    const controller = new AbortController();
+    const session = { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(session);
+      return new Promise(() => {});
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    expect(session.abortBash).toHaveBeenCalledOnce();
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(manager.getRecord(id)!.abortController!.signal.aborted).toBe(true);
+    expect(manager.getRecord(id)!.status).toBe("stopped");
+  });
+
+  it("parent abort signal cancels a queued background agent before it starts", () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const controller = new AbortController();
+
+    const runningId = manager.spawn(mockPi, mockCtx, "general-purpose", "running", {
+      description: "running",
+      isBackground: true,
+    });
+    const queuedId = manager.spawn(mockPi, mockCtx, "general-purpose", "queued", {
+      description: "queued",
+      isBackground: true,
+      signal: controller.signal,
+    });
+
+    expect(manager.getRecord(queuedId)!.status).toBe("queued");
+    const callsBeforeAbort = vi.mocked(runAgent).mock.calls.length;
+
+    controller.abort();
+
+    expect(manager.getRecord(queuedId)!.status).toBe("stopped");
+    expect(manager.getRecord(queuedId)!.abortController!.signal.aborted).toBe(true);
+    expect(runAgent).toHaveBeenCalledTimes(callsBeforeAbort);
+
+    manager.abort(runningId);
+  });
+
   it("abortAll() immediately aborts sessions and active bash for running records", () => {
     manager = new AgentManager();
     const sessions = [

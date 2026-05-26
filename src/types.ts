@@ -86,6 +86,8 @@ export interface AgentRecord {
   outputFile?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
+  /** Detaches a parent turn abort listener, when this agent is bound to one. */
+  parentAbortDetach?: () => void;
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately

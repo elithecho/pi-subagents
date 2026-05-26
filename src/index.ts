@@ -981,6 +981,7 @@ Guidelines:
             isBackground: true,
             isolation,
             invocation: agentInvocation,
+            signal,
             ...bgCallbacks,
           });
         } catch (err) {

@@ -70,6 +70,41 @@ describe("print mode background notifications", () => {
     vi.useRealTimers();
   });
 
+  it("background Agent runs are stopped when the parent tool signal aborts", async () => {
+    const controller = new AbortController();
+    const session = { dispose: vi.fn(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(session);
+      await new Promise(() => {});
+      return { responseText: "", session: session as any, aborted: true, steered: false };
+    });
+
+    const { pi, tools, handlers } = makePi();
+    subagentsExtension(pi);
+    await handlers.get("session_start")?.({ reason: "startup" }, makeHeadlessCtx());
+
+    const agentTool = tools.get("Agent");
+    await agentTool.execute(
+      "tool-call-1",
+      {
+        prompt: "keep working",
+        description: "background child",
+        subagent_type: "general-purpose",
+        run_in_background: true,
+      },
+      controller.signal,
+      undefined,
+      makeHeadlessCtx(),
+    );
+
+    controller.abort();
+
+    expect(session.abortBash).toHaveBeenCalledOnce();
+    expect(session.abort).toHaveBeenCalledOnce();
+
+    await handlers.get("session_shutdown")?.({}, makeHeadlessCtx());
+  });
+
   it("ignores stale-context errors from delayed completion nudges", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
