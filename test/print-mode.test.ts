@@ -105,6 +105,42 @@ describe("print mode background notifications", () => {
     await handlers.get("session_shutdown")?.({}, makeHeadlessCtx());
   });
 
+  it("Escape after a background agent completes suppresses its pending follow-up nudge", async () => {
+    const controller = new AbortController();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const { pi, tools, handlers } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    const agentTool = tools.get("Agent");
+    await agentTool.execute(
+      "tool-call-1",
+      {
+        prompt: "reply done",
+        description: "tiny child",
+        subagent_type: "general-purpose",
+        run_in_background: true,
+      },
+      controller.signal,
+      undefined,
+      makeHeadlessCtx(),
+    );
+
+    await vi.advanceTimersByTimeAsync(100); // smart-join batch debounce schedules the nudge
+    controller.abort(); // user pressed Escape after completion, before the delayed nudge fires
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    await handlers.get("session_shutdown")?.({}, makeHeadlessCtx());
+  });
+
   it("ignores stale-context errors from delayed completion nudges", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",

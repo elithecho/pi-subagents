@@ -134,7 +134,13 @@ export class AgentManager {
     this.agents.set(id, record);
 
     if (options.signal) {
-      const onParentAbort = () => this.abort(id);
+      const onParentAbort = () => {
+        if (record.status === "running" || record.status === "queued") {
+          this.abort(id);
+        } else if (options.isBackground) {
+          record.resultConsumed = true;
+        }
+      };
       options.signal.addEventListener("abort", onParentAbort, { once: true });
       record.parentAbortDetach = () => options.signal!.removeEventListener("abort", onParentAbort);
       if (options.signal.aborted) {
@@ -192,6 +198,7 @@ export class AgentManager {
     this.onStart?.(record);
 
     const detach = () => {
+      if (options.isBackground) return;
       record.parentAbortDetach?.();
       record.parentAbortDetach = undefined;
     };
