@@ -74,10 +74,10 @@ export class ConversationViewer implements Component {
     } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
       this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "pageUp") || matchesKey(data, "shift+up")) {
+    } else if (matchesKey(data, "ctrl+u") || matchesKey(data, "shift+up")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - viewportHeight);
       this.autoScroll = false;
-    } else if (matchesKey(data, "pageDown") || matchesKey(data, "shift+down")) {
+    } else if (matchesKey(data, "ctrl+d") || matchesKey(data, "shift+down")) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + viewportHeight);
       this.autoScroll = this.scrollOffset >= maxScroll;
     } else if (matchesKey(data, "home")) {
@@ -159,7 +159,7 @@ export class ConversationViewer implements Component {
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
     const stopHint = this.canStop() ? " · Esc/x stop · q close" : " · Esc/q close";
-    const footerRight = th.fg("dim", `↑↓ scroll · PgUp/PgDn or Shift+↑↓${stopHint}`);
+    const footerRight = th.fg("dim", `↑↓ scroll · Ctrl+U/D or Shift+↑↓${stopHint}`);
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);
