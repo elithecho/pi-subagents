@@ -43,6 +43,7 @@ export class AgentManager {
   private runtimes = new Map<string, Runtime>();
   private queue: WorkItem[] = [];
   private deferred = new Map<string, Deferred>();
+  private promotionDeferred = new Map<string, Deferred>();
   private active = new Set<string>();
   private activeItems = new Map<string, WorkItem>();
   private activeTasks = new Map<string, Promise<void>>();
@@ -343,7 +344,8 @@ export class AgentManager {
     }
     this.recomputePhase(record);
     if (!item.background) {
-      record.parentAbortDetach?.(); record.parentAbortDetach = undefined;
+      try { record.parentAbortDetach?.(); } catch { /* detach errors must not prevent deferred resolution */ }
+      record.parentAbortDetach = undefined;
     }
     const deferred = this.deferred.get(key);
     if (deferred && !deferred.settled) {
@@ -357,11 +359,34 @@ export class AgentManager {
     return snapshot;
   }
 
-  async spawnAndWait(pi: ExtensionAPI, ctx: ExtensionContext, type: SubagentType, prompt: string, options: Omit<SpawnOptions, "isBackground">): Promise<AgentRecord> {
+  async spawnAndWait(pi: ExtensionAPI, ctx: ExtensionContext, type: SubagentType, prompt: string, options: Omit<SpawnOptions, "isBackground">): Promise<{ kind: "completed"; record: AgentRecord; generation: number } | { kind: "backgrounded"; record: AgentRecord; generation: number }> {
     const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
     const record = this.agents.get(id)!;
-    await record.promise;
-    return record;
+    const generation = record.generation;
+
+    // Create a generation-scoped promotion waiter that promoteToBackground can
+    // resolve to release spawnAndWait without waiting for actual generation completion.
+    const key = `${id}:${generation}`;
+    const d: Deferred = { promise: null as any, resolve: null as any, settled: false };
+    d.promise = new Promise<string>(r => { d.resolve = r; });
+    this.promotionDeferred.set(key, d);
+
+    try {
+      await Promise.race([record.promise!, d.promise]);
+      if (d.settled) {
+        // Resolved by promotion — the exact waiter we set is the one that fired.
+        // An identity check is implicit: we only delete this specific promise.
+        return { kind: "backgrounded", record, generation };
+      }
+      // Completed naturally
+      return { kind: "completed", record, generation };
+    } finally {
+      // Identity-checked delete: only remove the exact waiter we created, never
+      // a replacement waiter from a later generation.
+      if (this.promotionDeferred.get(key) === d) {
+        this.promotionDeferred.delete(key);
+      }
+    }
   }
 
   getRecord(id: string): AgentRecord | undefined { return this.agents.get(id); }
@@ -395,7 +420,8 @@ export class AgentManager {
     const activeItem = this.activeItems.get(id);
     if (activeItem) this.settleTurn(record, activeItem, "stopped");
 
-    record.parentAbortDetach?.(); record.parentAbortDetach = undefined;
+    try { record.parentAbortDetach?.(); } catch {}
+    record.parentAbortDetach = undefined;
     try { record.session?.abortBash(); } catch {}
     try { void record.session?.abort(); } catch {}
     record.abortController?.abort();
@@ -407,7 +433,7 @@ export class AgentManager {
   }
 
   private cleanupRecordResources(record: AgentRecord): void {
-    record.parentAbortDetach?.();
+    try { record.parentAbortDetach?.(); } catch {}
     record.parentAbortDetach = undefined;
     record.outputCleanup?.(); record.outputCleanup = undefined;
     const runtime = this.runtimes.get(record.id);
@@ -421,11 +447,60 @@ export class AgentManager {
     record.session?.dispose?.(); record.session = undefined;
   }
 
+  /**
+   * Promote all eligible foreground agents in the given conversation to
+   * background. Eligibility: active (not background), initial spawnAndWait
+   * generation with a registered promotion-deferred waiter for the exact
+   * active WorkItem's generation, and a running work item. Returns the count
+   * of agents promoted.
+   */
+  promoteActiveToBackground(conversationId?: string): number {
+    let count = 0;
+    for (const [id, record] of this.agents) {
+      if (record.phase === "terminated") continue;
+      if (conversationId != null && record.conversationId !== conversationId) continue;
+      const item = this.activeItems.get(id);
+      if (!item || item.background || !item.initial) continue;
+      // Generation-scoped: promotion waiter must match the active item's generation.
+      const key = `${id}:${item.generation}`;
+      if (!this.promotionDeferred.has(key)) continue;
+      if (this.promoteToBackground(id, item, key)) count++;
+    }
+    return count;
+  }
+
+  private promoteToBackground(id: string, item: WorkItem, key: string): boolean {
+    const record = this.agents.get(id);
+    if (!record || record.phase === "terminated") return false;
+
+    // Transactional promotion: detach before mutating item/notify state.
+    // If detach throws, we must NOT leave partial promoted state.
+    try {
+      record.parentAbortDetach?.();
+    } catch {
+      // Detach failed — return false without promoting.
+      return false;
+    }
+    record.parentAbortDetach = undefined;
+
+    item.background = true;
+    item.notify = true;
+
+    // Resolve the generation-scoped promotion deferred so spawnAndWait returns immediately.
+    const d = this.promotionDeferred.get(key);
+    if (d && !d.settled) {
+      d.settled = true;
+      d.resolve("promoted");
+    }
+    return true;
+  }
+
   private removeRecord(id: string, record: AgentRecord): void {
     this.cleanupRecordResources(record);
     this.agents.delete(id); this.runtimes.delete(id);
     for (const key of this.deferred.keys()) if (key.startsWith(`${id}:`)) this.deferred.delete(key);
     for (const key of this.snapshots.keys()) if (key.startsWith(`${id}:`)) this.snapshots.delete(key);
+    for (const key of this.promotionDeferred.keys()) if (key.startsWith(`${id}:`)) this.promotionDeferred.delete(key);
   }
 
   /** Session switch cleanup: terminate and dispose every record, including idle. */

@@ -529,6 +529,11 @@ export default function (pi: ExtensionAPI) {
     const ui = ctx.ui as EditorUI;
     if (ui.setEditorComponent) {
       const previous = ui.getEditorComponent?.();
+      const promoteForeground = () => {
+        const conversationId = ctx.sessionManager?.getSessionId?.();
+        return manager.promoteActiveToBackground(conversationId) > 0;
+      };
+
       const wrapped = wrapEditorFactory(
         previous,
         widget,
@@ -545,6 +550,7 @@ export default function (pi: ExtensionAPI) {
           pi.sendUserMessage(text, { deliverAs: "steer" });
           return true;
         },
+        promoteForeground,
       );
       ui.setEditorComponent(wrapped);
       restoreEditor = ui.getEditorComponent
@@ -1194,9 +1200,9 @@ Guidelines:
 
       streamUpdate();
 
-      let record: AgentRecord;
+      let spawnResult: { kind: "completed"; record: AgentRecord; generation: number } | { kind: "backgrounded"; record: AgentRecord; generation: number };
       try {
-        record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
+        spawnResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           model,
           maxTurns: effectiveMaxTurns,
@@ -1213,7 +1219,34 @@ Guidelines:
         return textResult(err instanceof Error ? err.message : String(err));
       }
 
+      const { record } = spawnResult;
       clearInterval(spinnerInterval);
+
+      // If the foreground agent was promoted to background (Ctrl+B with queued
+      // parent message), release the tool call immediately and let the user know.
+      if (spawnResult.kind === "backgrounded") {
+        agentActivity.set(record.id, fgState);
+        widget.ensureTimer();
+        widget.update();
+
+        // Emit created event now so listeners see the transition
+        pi.events.emit("subagents:created", {
+          id: record.id,
+          type: subagentType,
+          description: params.description,
+          isBackground: true,
+        });
+
+        return textResult(
+          `Agent moved to background (Ctrl+B).\n` +
+          `Agent ID: ${record.id}\n` +
+          `Type: ${displayName}\n` +
+          `Description: ${params.description}\n` +
+          `\nYou will be notified when this agent completes.\n` +
+          `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+          { ...detailBase, toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: record.id },
+        );
+      }
 
       // Get final token count
       const tokenText = formatLifetimeTokens(fgState);
@@ -1792,10 +1825,21 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const record = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
+    const spawnResult = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
     });
+
+    if (spawnResult.kind === "backgrounded") {
+      ctx.ui.notify(
+        `Agent generation continues in background (ID: ${spawnResult.record.id}). ` +
+        `The agent definition will be written to ${targetPath} when complete.`,
+        "info",
+      );
+      return;
+    }
+
+    const { record } = spawnResult;
 
     if (record.status === "error") {
       ctx.ui.notify(`Generation failed: ${record.error}`, "warning");

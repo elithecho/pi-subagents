@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
+import { AgentNavigationEditor } from "../src/ui/agent-editor-wrapper.js";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -28,6 +29,21 @@ const resolvedRun = () =>
     aborted: false,
     steered: false,
   });
+
+/** Hanging mock that settles lazily on abort signal — prevents active-task leak during dispose. */
+function hangingRunAgent(): { release: (value?: any) => void } {
+  let outerResolve!: (value: any) => void;
+  vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts: any) => {
+    return new Promise(resolve => {
+      outerResolve = resolve;
+      const onAbort = () => {
+        resolve({ responseText: "aborted", session: mockSession(), aborted: true, steered: false });
+      };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  });
+  return { release: (val) => outerResolve(val ?? { responseText: "done", session: mockSession(), aborted: false, steered: false }) };
+}
 
 describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)", () => {
   let manager: AgentManager;
@@ -501,6 +517,386 @@ describe("AgentManager — active-only stop", () => {
   });
 });
 
+describe("AgentManager — promoteActiveToBackground", () => {
+  let manager: AgentManager;
+
+  afterEach(async () => {
+    vi.mocked(runAgent).mockRejectedValue(new Error("test cleanup abort"));
+    await manager?.dispose();
+  });
+
+  it("promotes a foreground agent to background, detaching from parent abort; spawnAndWait releases promptly and completion fires later", async () => {
+    // Arrange: foreground spawn with parent signal, agent hangs forever
+    let releaseAgent!: () => void;
+    const session = { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(session);
+      await new Promise<void>(resolve => { releaseAgent = resolve; });
+      return { responseText: "promoted result", session, aborted: false, steered: false };
+    });
+
+    const parentSignal = new AbortController();
+    const completed: any[] = [];
+    manager = new AgentManager((_record, turn) => completed.push(turn));
+
+    // Act: spawn foreground with parent signal
+    const spawnPromise = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "foreground", {
+      description: "fg",
+      signal: parentSignal.signal,
+    });
+
+    // Wait a tick for spawn to set up
+    await vi.waitFor(() => {
+      const records = manager.listAgents();
+      expect(records.length).toBe(1);
+      expect(records[0].session).toBe(session);
+    });
+
+    const record = manager.listAgents()[0];
+
+    // Promote to background via public API (conversationId is undefined here)
+    const count = manager.promoteActiveToBackground(undefined);
+    expect(count).toBe(1);
+    expect(record.status).toBe("running");
+
+    // spawnAndWait should release immediately (not hang on generation completion)
+    const result = await spawnPromise;
+    expect(result.record.id).toBe(record.id);
+    expect(result.kind).toBe("backgrounded");
+    expect(result.generation).toBe(1);
+
+    // Parent abort should NOT affect the promoted child
+    parentSignal.abort();
+    expect(session.abortBash).not.toHaveBeenCalled();
+    expect(session.abort).not.toHaveBeenCalled();
+    expect(manager.getRecord(record.id)!.phase).toBe("working");
+    expect(manager.getRecord(record.id)!.status).toBe("running");
+
+    // Now let the agent complete
+    releaseAgent();
+    await manager.waitForGeneration(record.id, 1);
+
+    // Verify generation completed and completion callback fired
+    expect(manager.getRecord(record.id)!.status).toBe("completed");
+    expect(manager.getRecord(record.id)!.result).toBe("promoted result");
+    expect(completed.length).toBe(1);
+    expect(completed[0].generation).toBe(1);
+    expect(completed[0].result).toBe("promoted result");
+  });
+
+  it("integrated: Ctrl+B via AgentNavigationEditor promotes foreground agent and spawnAndWait returns backgrounded", async () => {
+    // Arrange: foreground spawn with parent signal, agent hangs forever
+    let releaseAgent!: () => void;
+    const session = { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(session);
+      await new Promise<void>(resolve => { releaseAgent = resolve; });
+      return { responseText: "integrated result", session, aborted: false, steered: false };
+    });
+
+    const parentSignal = new AbortController();
+    manager = new AgentManager();
+
+    // Start foreground spawn
+    const spawnPromise = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+      signal: parentSignal.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.listAgents().length).toBe(1);
+    });
+
+    // Build a mock base editor with onEscape that aborts parent signal and restores text
+    let baseText = "draft";
+    const base: any = {
+      render: vi.fn(() => []),
+      invalidate: vi.fn(),
+      getText: vi.fn(() => baseText),
+      setText: vi.fn((t: string) => { baseText = t; }),
+      handleInput: vi.fn(),
+      onEscape: vi.fn(() => {
+        // Abort the parent signal (simulating parent turn being interrupted)
+        parentSignal.abort();
+        // Restore queued text into the editor
+        baseText = "queued";
+      }),
+    };
+
+    // Mock AgentWidget with minimal interface
+    const widget: any = {
+      focusList: vi.fn(() => false),
+      leaveList: vi.fn(),
+      moveSelection: vi.fn(),
+      selectedAgent: vi.fn(() => undefined),
+      ensureTimer: vi.fn(),
+      update: vi.fn(),
+    };
+
+    // The promote callback wired by session_start in index.ts
+    const promoteForeground = () => {
+      const conversationId = undefined;
+      return manager.promoteActiveToBackground(conversationId) > 0;
+    };
+
+    // Prevent submit from hanging
+    const submit = vi.fn(() => true);
+    const waitForIdle = vi.fn(async () => true);
+
+    const editor = new AgentNavigationEditor(
+      base, widget, vi.fn(),
+      () => true, // hasPendingMessages
+      waitForIdle,
+      submit,
+      promoteForeground,
+    );
+
+    // Act: press Ctrl+B
+    editor.handleInput("\u0002");
+
+    // Assert: promoteForeground was called, onEscape was called
+    expect(promoteForeground).toBeDefined();
+    expect(base.onEscape).toHaveBeenCalledOnce();
+
+    // spawnAndWait returns tagged backgrounded
+    const result = await spawnPromise;
+    expect(result.kind).toBe("backgrounded");
+    expect(result.generation).toBe(1);
+    expect(result.record.session).toBe(session);
+
+    // Child session NOT aborted by parent signal (parent was aborted inside onEscape,
+    // but detach happened first)
+    expect(session.abortBash).not.toHaveBeenCalled();
+    expect(session.abort).not.toHaveBeenCalled();
+    expect(manager.getRecord(result.record.id)!.status).toBe("running");
+
+    // Now release the agent and verify completion
+    releaseAgent();
+    await manager.waitForGeneration(result.record.id, 1);
+    expect(manager.getRecord(result.record.id)!.status).toBe("completed");
+    expect(manager.getRecord(result.record.id)!.result).toBe("integrated result");
+  });
+
+  it("returns 0 for non-existent conversation", () => {
+    manager = new AgentManager();
+    expect(manager.promoteActiveToBackground("nonexistent-conversation")).toBe(0);
+  });
+
+  it("returns 0 for terminated or non-eligible agents", async () => {
+    manager = new AgentManager();
+    hangingRunAgent();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+    });
+    manager.abort(id);
+
+    // Wait for abort to settle the active task
+    await vi.waitFor(() => {
+      expect(manager.getRecord(id)?.phase).toBe("terminated");
+    });
+
+    // No promotionDeferred was created (spawn, not spawnAndWait)
+    expect(manager.promoteActiveToBackground(undefined)).toBe(0);
+  });
+
+  it("does not promote resumed foreground turns (no promotionDeferred)", async () => {
+    manager = new AgentManager();
+    const session = mockSession();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "initial", session, aborted: false, steered: false,
+    });
+
+    // Spawn foreground and let it complete
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", {
+      description: "fg",
+    });
+
+    // Mock resume — keep it pending so we can test promotion during active resume
+    let releaseResume!: () => void;
+    const { resumeAgent } = await import("../src/agent-runner.js");
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      await new Promise<void>(resolve => { releaseResume = resolve; });
+      return { responseText: "resume result", aborted: false, steered: false, cancelled: false };
+    });
+
+    // Start a foreground resume turn (via enqueueTurn + waitForGeneration)
+    const resumeGen = manager.enqueueTurn(record.id, "more", undefined, {
+      background: false, notify: false, bypassQueue: true,
+    })!;
+
+    // Wait for the agent to be actively running the resume turn
+    await vi.waitFor(() => {
+      expect(manager.getRecord(record.id)?.status).toBe("running");
+    });
+
+    // While resume is pending, promoteActiveToBackground should return 0
+    // because the active item is not initial (it's a resumed turn, generation > 1).
+    expect(manager.promoteActiveToBackground(undefined)).toBe(0);
+
+    // Release resume and await completion
+    releaseResume();
+    const snapshot = await manager.waitForGeneration(record.id, resumeGen);
+    expect(snapshot?.status).toBe("completed");
+    expect(snapshot?.result).toBe("resume result");
+  });
+
+  it("promotes detachment throwing does not promote; item remains foreground, spawnAndWait returns completed", async () => {
+    let releaseAgent!: () => void;
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      opts.onSessionCreated?.(session);
+      await new Promise<void>(resolve => { releaseAgent = resolve; });
+      return { responseText: "detach fail completed", session, aborted: false, steered: false };
+    });
+
+    const parentSignal = new AbortController();
+    manager = new AgentManager();
+
+    const spawnPromise = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+      signal: parentSignal.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.listAgents().length).toBe(1);
+    });
+
+    const record = manager.listAgents()[0];
+
+    // Make parentAbortDetach throw
+    record.parentAbortDetach = () => { throw new Error("detach failed"); };
+
+    // Promotion should return 0 — no partial state
+    const count = manager.promoteActiveToBackground(undefined);
+    expect(count).toBe(0);
+
+    // Item should still be foreground and eligible
+    const item = (manager as any).activeItems.get(record.id);
+    expect(item).toBeDefined();
+    expect(item.background).toBe(false);
+
+    // spawnAndWait should NOT have been resolved as backgrounded
+    // Let the agent complete naturally
+    releaseAgent();
+    const result = await spawnPromise;
+    expect(result.kind).toBe("completed");
+    expect(result.record.id).toBe(record.id);
+    expect(result.generation).toBe(1);
+    expect(result.record.status).toBe("completed");
+  });
+
+  it("completion-vs-promotion cleanup: promoted agent that later completes cleans up promotionDeferred", async () => {
+    let releaseAgent!: () => void;
+    const session = { ...mockSession(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(session);
+      await new Promise<void>(resolve => { releaseAgent = resolve; });
+      return { responseText: "first promoted then completed", session, aborted: false, steered: false };
+    });
+
+    const parentSignal = new AbortController();
+    manager = new AgentManager();
+
+    const spawnPromise = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+      signal: parentSignal.signal,
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.listAgents().length).toBe(1);
+    });
+
+    const record = manager.listAgents()[0];
+
+    // Promote to background
+    expect(manager.promoteActiveToBackground(undefined)).toBe(1);
+
+    const result = await spawnPromise;
+    expect(result.kind).toBe("backgrounded");
+
+    // After promotion, promotionDeferred should still have the key
+    const key = `${record.id}:${result.generation}`;
+    expect((manager as any).promotionDeferred.has(key)).toBe(false);
+
+    // Complete naturally — should not error or leak
+    releaseAgent();
+    await manager.waitForGeneration(record.id, 1);
+
+    // promotionDeferred should still be clean
+    expect((manager as any).promotionDeferred.has(key)).toBe(false);
+    expect((manager as any).promotionDeferred.size).toBe(0);
+  });
+
+  it("normal completion removes the exact waiter in finally; no leak when agent finishes first", async () => {
+    const session = mockSession();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "fast complete", session, aborted: false, steered: false,
+    });
+
+    manager = new AgentManager();
+    const spawnResult = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+    });
+
+    // Completed naturally
+    expect(spawnResult.kind).toBe("completed");
+    expect(spawnResult.record.status).toBe("completed");
+
+    // promotionDeferred must be empty
+    expect((manager as any).promotionDeferred.size).toBe(0);
+  });
+
+  it("promotes all eligible initial foreground agents in the current conversation and leaves another conversation untouched", async () => {
+    manager = new AgentManager();
+    hangingRunAgent();
+
+    const convId = "conv-1";
+    const ctxWithConv = { ...mockCtx, sessionManager: { getSessionId: () => convId } };
+
+    // Spawn two foreground in conv-1 via spawnAndWait (creates promotionDeferreds)
+    const p1 = manager.spawnAndWait(mockPi, ctxWithConv, "general-purpose", "first", {
+      description: "first",
+    });
+    const p2 = manager.spawnAndWait(mockPi, ctxWithConv, "general-purpose", "second", {
+      description: "second",
+    });
+
+    // Wait for both to be running
+    await vi.waitFor(() => {
+      expect(manager.listAgents().length).toBe(2);
+    });
+
+    // Promote all in conversation — both eligible
+    const count = manager.promoteActiveToBackground(convId);
+    expect(count).toBe(2);
+
+    // Both spawnAndWait should resolve with kind="backgrounded"
+    const r1 = await p1;
+    const r2 = await p2;
+    expect(r1.kind).toBe("backgrounded");
+    expect(r1.generation).toBe(1);
+    expect(r2.kind).toBe("backgrounded");
+    expect(r2.generation).toBe(1);
+
+    // Parallel conversation untouched
+    const ctxOther = { ...mockCtx, sessionManager: { getSessionId: () => "other-conv" } };
+    const p3 = manager.spawnAndWait(mockPi, ctxOther, "general-purpose", "other", {
+      description: "other",
+    });
+    await vi.waitFor(() => {
+      expect(manager.listAgents().length).toBe(3);
+    });
+
+    // Promote only other conversation
+    expect(manager.promoteActiveToBackground("other-conv")).toBe(1);
+    const r3 = await p3;
+    expect(r3.kind).toBe("backgrounded");
+    expect(r3.generation).toBe(1);
+    // Conv-1 count wasn't re-promoted
+    expect(manager.promoteActiveToBackground(convId)).toBe(0);
+  });
+});
+
 describe("AgentManager — reusable FIFO generations", () => {
   let manager: AgentManager;
   afterEach(() => { void manager?.dispose(); });
@@ -671,7 +1067,7 @@ describe("AgentManager — reusable FIFO generations", () => {
     vi.mocked(runAgent).mockResolvedValueOnce({
       responseText: "foreground", session: foregroundSession, aborted: false, steered: false,
     });
-    const foreground = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", { description: "foreground" });
+    const { record: foreground } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", { description: "foreground" });
 
     let releaseBlocker!: (value: any) => void;
     vi.mocked(runAgent).mockImplementationOnce(() => new Promise(resolve => { releaseBlocker = resolve; }));

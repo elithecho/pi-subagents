@@ -69,7 +69,7 @@ describe("AgentNavigationEditor", () => {
     let acknowledge!: (submitted: boolean) => void;
     const waitForIdle = vi.fn(() => new Promise<boolean>(resolve => { becomeIdle = resolve; }));
     const submit = vi.fn(() => new Promise<boolean>(resolve => { acknowledge = resolve; }));
-    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, waitForIdle, submit);
+    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, waitForIdle, submit, vi.fn(() => true));
 
     editor.handleInput("\u0002");
 
@@ -98,7 +98,7 @@ describe("AgentNavigationEditor", () => {
     });
     const agents = widget();
     agents.leaveList.mockImplementation(() => { order.push("leave"); });
-    const editor = new AgentNavigationEditor(base, agents, vi.fn(), () => true, () => new Promise(() => {}));
+    const editor = new AgentNavigationEditor(base, agents, vi.fn(), () => true, () => new Promise(() => {}), undefined, vi.fn(() => true));
     editor.handleInput("\u001b[B");
 
     editor.handleInput("\u0002");
@@ -114,7 +114,7 @@ describe("AgentNavigationEditor", () => {
     const submit = vi.fn(() => true);
     const editor = new AgentNavigationEditor(
       base, widget(), vi.fn(), () => true,
-      () => new Promise<boolean>(resolve => { becomeIdle = resolve; }), submit,
+      () => new Promise<boolean>(resolve => { becomeIdle = resolve; }), submit, vi.fn(() => true),
     );
     editor.handleInput("\u0002");
     base.setText("edited");
@@ -134,7 +134,7 @@ describe("AgentNavigationEditor", () => {
       onEscape: vi.fn(() => { base.setText("queued"); }),
     });
     const submit = vi.fn(result);
-    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, async () => true, submit);
+    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, async () => true, submit, vi.fn(() => true));
 
     editor.handleInput("\u0002");
     await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
@@ -147,7 +147,7 @@ describe("AgentNavigationEditor", () => {
       onEscape: vi.fn(() => { base.setText("queued"); }),
     });
     const submit = vi.fn(() => true);
-    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, async () => false, submit);
+    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, async () => false, submit, vi.fn(() => true));
 
     editor.handleInput("\u0002");
     await Promise.resolve();
@@ -164,7 +164,7 @@ describe("AgentNavigationEditor", () => {
     const submit = vi.fn(() => true);
     const editor = new AgentNavigationEditor(
       base, widget(), vi.fn(), () => true,
-      () => new Promise<boolean>(resolve => { becomeIdle = resolve; }), submit,
+      () => new Promise<boolean>(resolve => { becomeIdle = resolve; }), submit, vi.fn(() => true),
     );
 
     editor.handleInput("\u0002");
@@ -174,6 +174,61 @@ describe("AgentNavigationEditor", () => {
 
     becomeIdle(true);
     await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  });
+
+  it("calls promoteForegroundAgent before onEscape during Ctrl+B with pending messages", async () => {
+    const base = Object.assign(baseEditor(), {
+      onEscape: vi.fn(() => { base.setText("queued"); }),
+    });
+    const promote = vi.fn(() => true);
+    const editor = new AgentNavigationEditor(
+      base, widget(), vi.fn(), () => true,
+      async () => true, vi.fn(() => true), promote,
+    );
+
+    editor.handleInput("\u0002");
+
+    // promoteForegroundAgent called BEFORE onEscape
+    expect(promote).toHaveBeenCalledOnce();
+    expect(base.onEscape).toHaveBeenCalledOnce();
+    // onEscape called after promote
+    expect(promote.mock.invocationCallOrder[0]).toBeLessThan(base.onEscape!.mock.invocationCallOrder[0]);
+  });
+
+  it("delegates Ctrl+B when promoteForegroundAgent returns false (no eligible agent)", () => {
+    const base = Object.assign(baseEditor(), {
+      onEscape: vi.fn(() => { base.setText("queued"); }),
+    });
+    const promote = vi.fn(() => false);
+    const editor = new AgentNavigationEditor(
+      base, widget(), vi.fn(), () => true,
+      () => new Promise(() => {}), () => false, promote,
+    );
+
+    editor.handleInput("\u0002");
+
+    // Promotion returned false — onEscape must NOT be called, delegate to base
+    expect(promote).toHaveBeenCalledOnce();
+    expect(base.onEscape).not.toHaveBeenCalled();
+    expect(base.handleInput).toHaveBeenCalledWith("\u0002");
+  });
+
+  it("delegates Ctrl+B when promoteForegroundAgent throws (fail-closed)", () => {
+    const base = Object.assign(baseEditor(), {
+      onEscape: vi.fn(() => { base.setText("queued"); }),
+    });
+    const promote = vi.fn(() => { throw new Error("promotion failed"); });
+    const editor = new AgentNavigationEditor(
+      base, widget(), vi.fn(), () => true,
+      () => new Promise(() => {}), () => false, promote,
+    );
+
+    editor.handleInput("\u0002");
+
+    // Promotion threw — onEscape must NOT be called, delegate to base
+    expect(promote).toHaveBeenCalledOnce();
+    expect(base.onEscape).not.toHaveBeenCalled();
+    expect(base.handleInput).toHaveBeenCalledWith("\u0002");
   });
 
   it("delegates Ctrl+B unchanged when no messages are pending", () => {
@@ -198,7 +253,7 @@ describe("AgentNavigationEditor", () => {
     const base = Object.assign(baseEditor("draft"), { onEscape: vi.fn() });
     const waitForIdle = vi.fn(async () => true);
     const submit = vi.fn(() => true);
-    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, waitForIdle, submit);
+    const editor = new AgentNavigationEditor(base, widget(), vi.fn(), () => true, waitForIdle, submit, vi.fn(() => true));
 
     editor.handleInput("\u0002");
 

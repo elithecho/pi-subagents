@@ -18,6 +18,8 @@ export class AgentNavigationEditor implements EditorComponent {
     private hasPendingMessages: () => boolean = () => false,
     private waitForIdle: () => Promise<boolean> = async () => true,
     private submitRestoredMessage: (text: string) => boolean | Promise<boolean> = () => false,
+    /** Callback to promote the running foreground agent to background before Escape. */
+    private promoteForegroundAgent?: () => boolean,
   ) {}
 
   // Preserve TUI focus/cursor and Kitty key-release behavior through the proxy.
@@ -77,6 +79,21 @@ export class AgentNavigationEditor implements EditorComponent {
       if (this.hasPendingMessages()) {
         const onEscape = this.onEscape;
         if (typeof onEscape === "function") {
+          // Promote before Escape: if no eligible foreground agent or
+          // promotion throws, delegate Ctrl+B unchanged (fail-closed).
+          let promoted = false;
+          try {
+            promoted = this.promoteForegroundAgent?.() === true;
+          } catch {
+            // promotion threw — delegate to base, do not activate transition
+            this.base.handleInput(data);
+            return;
+          }
+          if (!promoted) {
+            // no eligible foreground agent — delegate to base
+            this.base.handleInput(data);
+            return;
+          }
           this.leaveList();
           this.ctrlBTransitionActive = true;
           void this.interruptAndSubmitRestored(onEscape);
@@ -152,9 +169,10 @@ export function wrapEditorFactory(
   hasPendingMessages: () => boolean = () => false,
   waitForIdle: () => Promise<boolean> = async () => true,
   submitRestoredMessage: (text: string) => boolean | Promise<boolean> = () => false,
+  promoteForegroundAgent?: () => boolean,
 ): EditorFactory {
   return (tui, theme, keybindings) => {
     const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
-    return new AgentNavigationEditor(base, widget, openAgent, hasPendingMessages, waitForIdle, submitRestoredMessage);
+    return new AgentNavigationEditor(base, widget, openAgent, hasPendingMessages, waitForIdle, submitRestoredMessage, promoteForegroundAgent);
   };
 }
