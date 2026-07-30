@@ -91,6 +91,13 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
       // agent's auth lookup doesn't crash with "No API key found for
       // undefined".
       let normalizedOptions = options ?? {};
+      if ("run_in_background" in normalizedOptions) {
+        normalizedOptions = {
+          ...normalizedOptions,
+          isBackground: normalizedOptions.run_in_background,
+        };
+        delete normalizedOptions.run_in_background;
+      }
       if (typeof normalizedOptions.model === "string") {
         const registry = (ctx as { modelRegistry?: ModelRegistry }).modelRegistry;
         if (!registry) {

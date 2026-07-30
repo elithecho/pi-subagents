@@ -9,6 +9,7 @@ vi.mock("../src/agent-runner.js", () => ({
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
+  checkpointWorktree: vi.fn(() => ({ hasChanges: false })),
   cleanupWorktree: vi.fn(() => ({ hasChanges: false })),
   pruneWorktrees: vi.fn(),
 }));
@@ -443,13 +444,240 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
-      return "second";
+      return { responseText: "second", aborted: false, steered: false, cancelled: false };
     });
 
     await manager.resume(id, "more");
 
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
+  });
+});
+
+describe("AgentManager — active-only stop", () => {
+  it("stops running/queued work without terminating idle reusable agents", async () => {
+    const manager = new AgentManager(undefined, 1);
+    resolvedRun();
+    const idleId = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", {
+      description: "idle", isBackground: true,
+    });
+    await manager.waitForGeneration(idleId, 1);
+
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const runningId = manager.spawn(mockPi, mockCtx, "general-purpose", "running", {
+      description: "running", isBackground: true,
+    });
+    const queuedId = manager.spawn(mockPi, mockCtx, "general-purpose", "queued", {
+      description: "queued", isBackground: true,
+    });
+
+    expect(manager.abortActive()).toBe(2);
+    expect(manager.getRecord(idleId)?.phase).toBe("idle");
+    expect(manager.getRecord(idleId)?.session).toBeDefined();
+    expect(manager.getRecord(runningId)?.phase).toBe("terminated");
+    expect(manager.getRecord(queuedId)?.phase).toBe("terminated");
+    void manager.dispose();
+  });
+});
+
+describe("AgentManager — reusable FIFO generations", () => {
+  let manager: AgentManager;
+  afterEach(() => { void manager?.dispose(); });
+
+  it("runs injected turns FIFO without overlapping session.prompt calls", async () => {
+    const session = mockSession();
+    let finishInitial!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => { finishInitial = resolve; }));
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "fifo", isBackground: true });
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockClear();
+    const order: string[] = [];
+    vi.mocked(resumeMock).mockImplementation(async (_session, prompt) => {
+      order.push(prompt);
+      return { responseText: `done:${prompt}`, aborted: false, steered: false, cancelled: false };
+    });
+    const g2 = manager.enqueueTurn(id, "second")!;
+    const g3 = manager.enqueueTurn(id, "third")!;
+
+    expect(resumeMock).not.toHaveBeenCalled();
+    finishInitial({ responseText: "done:first", session, aborted: false, steered: false });
+    await manager.waitForGeneration(id, g3);
+
+    expect(order).toEqual(["second", "third"]);
+    expect(manager.getRecord(id)?.phase).toBe("idle");
+    expect(manager.getTurnResult(id, g2)?.result).toBe("done:second");
+    expect(manager.getTurnResult(id, g3)?.result).toBe("done:third");
+  });
+
+  it("abort settles every generation once but retains the slot until prompt quiesces", async () => {
+    let release!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    manager = new AgentManager(undefined, 1);
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "stop", isBackground: true });
+    const queuedGeneration = manager.enqueueTurn(id, "queued")!;
+    resolvedRun();
+    const other = manager.spawn(mockPi, mockCtx, "general-purpose", "other", { description: "other", isBackground: true });
+
+    manager.abort(id);
+    await expect(manager.waitForGeneration(id, 1)).resolves.toMatchObject({ status: "stopped" });
+    await expect(manager.waitForGeneration(id, queuedGeneration)).resolves.toMatchObject({ status: "stopped" });
+    expect(manager.getRecord(other)?.phase).toBe("queued");
+
+    release({ responseText: "late", session: mockSession(), aborted: true, steered: false });
+    await manager.waitForGeneration(other, 1);
+    expect(manager.getRecord(other)?.phase).toBe("idle");
+    expect(manager.getTurnResult(id, 1)?.status).toBe("stopped");
+  });
+
+  it("settles generation one when spawned with an already-aborted signal", async () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    const controller = new AbortController();
+    controller.abort();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "never", {
+      description: "cancelled", isBackground: true, signal: controller.signal,
+    });
+
+    await expect(manager.waitForGeneration(id, 1)).resolves.toMatchObject({ status: "stopped" });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("cancels an already-queued generation from its own signal", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const running = manager.spawn(mockPi, mockCtx, "general-purpose", "running", { description: "running", isBackground: true });
+    const queued = manager.spawn(mockPi, mockCtx, "general-purpose", "queued", { description: "queued", isBackground: true });
+    const controller = new AbortController();
+    const generation = manager.enqueueTurn(queued, "cancel me", controller.signal)!;
+    controller.abort();
+
+    await expect(manager.waitForGeneration(queued, generation)).resolves.toMatchObject({ status: "stopped" });
+    manager.abort(running);
+    manager.abort(queued);
+  });
+
+  it("starts bypassQueue work immediately without releasing normal capacity", () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager.spawn(mockPi, mockCtx, "general-purpose", "one", { description: "one", isBackground: true });
+    const normal = manager.spawn(mockPi, mockCtx, "general-purpose", "normal", { description: "normal", isBackground: true });
+    const bypass = manager.spawn(mockPi, mockCtx, "general-purpose", "bypass", { description: "bypass", isBackground: true, bypassQueue: true });
+
+    expect(manager.getRecord(normal)?.phase).toBe("queued");
+    expect(manager.getRecord(bypass)?.phase).toBe("working");
+    expect(runAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it("becomes idle when the newest queued turn is cancelled before an older turn settles", async () => {
+    let finishInitial!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => { finishInitial = resolve; }));
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "older", { description: "phase", isBackground: true });
+    const controller = new AbortController();
+    const newest = manager.enqueueTurn(id, "newest", controller.signal)!;
+    controller.abort();
+    await manager.waitForGeneration(id, newest);
+    expect(manager.getRecord(id)?.phase).toBe("working");
+
+    finishInitial({ responseText: "older done", session: mockSession(), aborted: false, steered: false });
+    await manager.waitForGeneration(id, 1);
+    expect(manager.getRecord(id)?.phase).toBe("idle");
+  });
+
+  it("resume returns its exact consumed snapshot and suppresses background completion", async () => {
+    const completed: any[] = [];
+    manager = new AgentManager((_record, turn) => completed.push(turn));
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "resume", isBackground: true });
+    await manager.waitForGeneration(id, 1);
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({ responseText: "exact second", aborted: false, steered: false, cancelled: false });
+
+    const snapshot = await manager.resume(id, "second");
+
+    expect(snapshot).toMatchObject({ generation: 2, result: "exact second", status: "completed" });
+    expect(completed.map(t => t.generation)).toEqual([1]);
+    expect(manager.getRecord(id)?.consumedGenerations.has(2)).toBe(true);
+  });
+
+  it("maps a cancelled resumed prompt to stopped without stale output", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "cancel resume", isBackground: true });
+    await manager.waitForGeneration(id, 1);
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({ responseText: "stale previous answer", aborted: false, steered: false, cancelled: true });
+
+    const snapshot = await manager.resume(id, "cancelled");
+
+    expect(snapshot).toMatchObject({ generation: 2, status: "stopped", result: "" });
+  });
+
+  it("removes archived generation snapshots with the record", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "cleanup", isBackground: true });
+    await manager.waitForGeneration(id, 1);
+    manager.clearCompleted();
+
+    expect(manager.getTurnResult(id, 1)).toBeUndefined();
+    expect([...(manager as any).snapshots.keys()].some((key: string) => key.startsWith(`${id}:`))).toBe(false);
+  });
+
+  it("surfaces checkpoint failure alongside the original turn error", async () => {
+    const { createWorktree, checkpointWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({ path: "/tmp/worktree", branch: "branch" });
+    vi.mocked(checkpointWorktree).mockReturnValueOnce({ hasChanges: false, error: "git commit failed" });
+    vi.mocked(runAgent).mockRejectedValueOnce(new Error("provider failed"));
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", {
+      description: "checkpoint", isBackground: true, isolation: "worktree",
+    });
+
+    const snapshot = await manager.waitForGeneration(id, 1);
+    expect(snapshot?.status).toBe("error");
+    expect(snapshot?.error).toContain("provider failed");
+    expect(snapshot?.error).toContain("Worktree checkpoint failed: git commit failed");
+  });
+
+  it("schedules a foreground agent's steered turn as background work", async () => {
+    const completed: any[] = [];
+    manager = new AgentManager((_record, turn) => completed.push(turn), 1);
+    const foregroundSession = mockSession();
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      responseText: "foreground", session: foregroundSession, aborted: false, steered: false,
+    });
+    const foreground = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", { description: "foreground" });
+
+    let releaseBlocker!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise(resolve => { releaseBlocker = resolve; }));
+    const blocker = manager.spawn(mockPi, mockCtx, "general-purpose", "block", { description: "block", isBackground: true });
+    const generation = manager.enqueueTurn(foreground.id, "steered")!;
+    expect(manager.getRecord(foreground.id)?.phase).toBe("queued");
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({ responseText: "background turn", aborted: false, steered: false, cancelled: false });
+    releaseBlocker({ responseText: "unblocked", session: mockSession(), aborted: false, steered: false });
+    await manager.waitForGeneration(foreground.id, generation);
+
+    expect(completed.map(turn => turn.agentId)).toContain(foreground.id);
+    expect(manager.getTurnResult(foreground.id, generation)?.result).toBe("background turn");
+    manager.abort(blocker);
+  });
+
+  it("waits for the captured generation even after a later turn is queued", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "race", isBackground: true });
+    const captured = manager.captureGeneration(id)!;
+    const first = await manager.waitForGeneration(id, captured);
+    manager.enqueueTurn(id, "later");
+
+    expect(first?.generation).toBe(1);
+    expect(first?.result).toBe("done");
   });
 });
 
@@ -461,6 +689,43 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
 
   afterEach(() => {
     manager?.dispose();
+  });
+
+  it("immediate background spawn throws setup failure instead of returning started", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+    const completed = vi.fn();
+    manager = new AgentManager(completed);
+
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "background worktree", isolation: "worktree", isBackground: true,
+    })).toThrow(/Cannot run with isolation: "worktree"/);
+
+    expect(manager.listAgents()).toEqual([]);
+    expect(completed).not.toHaveBeenCalled();
+  });
+
+  it("queued background setup failure settles asynchronously when its slot opens", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    let release!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const completed = vi.fn();
+    manager = new AgentManager(completed, 1);
+    manager.spawn(mockPi, mockCtx, "general-purpose", "block", {
+      description: "blocker", isBackground: true,
+    });
+    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+
+    const queuedId = manager.spawn(mockPi, mockCtx, "general-purpose", "later", {
+      description: "queued worktree", isolation: "worktree", isBackground: true,
+    });
+    expect(manager.getRecord(queuedId)?.phase).toBe("queued");
+
+    release({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    const result = await manager.waitForGeneration(queuedId, 1);
+    expect(result).toMatchObject({ status: "error" });
+    expect(result?.error).toMatch(/Cannot run with isolation: "worktree"/);
+    expect(completed).toHaveBeenCalledWith(manager.getRecord(queuedId), result);
   });
 
   it("spawn() throws when createWorktree returns undefined; no orphan record left behind", async () => {

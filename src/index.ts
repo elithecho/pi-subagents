@@ -16,7 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -29,6 +29,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
+import { type EditorFactory, wrapEditorFactory } from "./ui/agent-editor-wrapper.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -290,8 +291,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Individual nudge helper (async join mode) ----
+  function isCurrentCompletion(record: AgentRecord): boolean {
+    const live = manager.getRecord(record.id);
+    const conversationId = currentCtx?.sessionManager?.getSessionId?.();
+    return !!live && live.conversationId === conversationId && record.conversationId === conversationId
+      && manager.getTurnResult(record.id, record.generation) != null;
+  }
+
   function emitIndividualNudge(record: AgentRecord) {
-    if (record.resultConsumed) return;  // re-check at send time
+    if (!isCurrentCompletion(record)) return;
+    if (manager.getRecord(record.id)?.consumedGenerations.has(record.generation)) return;
 
     const notification = formatTaskNotification(record, 500);
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
@@ -305,21 +314,20 @@ export default function (pi: ExtensionAPI) {
   }
 
   function sendIndividualNudge(record: AgentRecord) {
-    agentActivity.delete(record.id);
     widget.markFinished(record.id);
-    scheduleNudge(record.id, () => emitIndividualNudge(record));
+    scheduleNudge(`${record.id}:${record.generation}`, () => emitIndividualNudge(record));
     widget.update();
   }
 
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); }
+      for (const r of records) widget.markFinished(r.id);
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
       scheduleNudge(groupKey, () => {
         // Re-check at send time
-        const unconsumed = records.filter(r => !r.resultConsumed);
+        const unconsumed = records.filter(r => isCurrentCompletion(r) && !manager.getRecord(r.id)?.consumedGenerations.has(r.generation));
         if (unconsumed.length === 0) { widget.update(); return; }
 
         const notifications = unconsumed.map(r => formatTaskNotification(r, 300)).join('\n\n');
@@ -371,7 +379,21 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Background completion: route through group join or send individual nudge
-  const manager = new AgentManager((record) => {
+  const manager = new AgentManager((liveRecord, turn) => {
+    // Snapshot the completed generation: later queued turns must not mutate notifications.
+    const record: AgentRecord = {
+      ...liveRecord,
+      generation: turn.generation,
+      status: turn.status,
+      result: turn.result,
+      error: turn.error,
+      startedAt: turn.startedAt,
+      completedAt: turn.completedAt,
+      toolUses: turn.toolUses,
+      lifetimeUsage: { ...turn.lifetimeUsage },
+      compactionCount: turn.compactionCount,
+      resultConsumed: liveRecord.consumedGenerations.has(turn.generation),
+    };
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -390,7 +412,6 @@ export default function (pi: ExtensionAPI) {
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
-      agentActivity.delete(record.id);
       widget.markFinished(record.id);
       widget.update();
       return;
@@ -398,12 +419,13 @@ export default function (pi: ExtensionAPI) {
 
     // If this agent is pending batch finalization (debounce window still open),
     // don't send an individual nudge — finalizeBatch will pick it up retroactively.
-    if (currentBatchAgents.some(a => a.id === record.id)) {
+    if (turn.generation === 1 && currentBatchAgents.some(a => a.id === record.id)) {
       widget.update();
       return;
     }
 
-    const result = groupJoin.onAgentComplete(record);
+    // Only the initial generation participates in spawn-time grouping.
+    const result = turn.generation === 1 ? groupJoin.onAgentComplete(record) : 'pass';
     if (result === 'pass') {
       sendIndividualNudge(record);
     }
@@ -411,6 +433,17 @@ export default function (pi: ExtensionAPI) {
     // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
+    // Reuse per-agent activity instrumentation across idle chat turns.
+    let activity = agentActivity.get(record.id);
+    if (!activity) {
+      activity = createActivityTracker(record.invocation?.maxTurns).state;
+      agentActivity.set(record.id, activity);
+    }
+    activity.activeTools.clear();
+    activity.responseText = "";
+    activity.turnCount = 1;
+    widget.ensureTimer();
+    widget.update();
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -467,15 +500,60 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  type EditorUI = UICtx & {
+    getEditorComponent?: () => EditorFactory | undefined;
+    setEditorComponent?: (factory: EditorFactory | undefined) => void;
+  };
+  let restoreEditor: (() => void) | undefined;
+
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
+  const resetCompletionState = () => {
+    for (const timer of pendingNudges.values()) clearTimeout(timer);
+    pendingNudges.clear();
+    if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+    batchFinalizeTimer = undefined;
+    currentBatchAgents = [];
+    groupJoin.dispose();
+  };
+
   pi.on("session_start", async (_event, ctx) => {
-    currentCtx = ctx;
+    resetCompletionState();
+    await manager.terminateAll();
     manager.clearCompleted();
+    agentActivity.clear();
+    currentCtx = ctx;
+    widget.setUICtx(ctx.ui as UICtx);
+    widget.setConversationId(ctx.sessionManager?.getSessionId?.());
+    restoreEditor?.();
+    restoreEditor = undefined;
+    const ui = ctx.ui as EditorUI;
+    if (ui.setEditorComponent) {
+      const previous = ui.getEditorComponent?.();
+      const wrapped = wrapEditorFactory(previous, widget, record => viewAgentConversation(ctx, record));
+      ui.setEditorComponent(wrapped);
+      restoreEditor = ui.getEditorComponent
+        ? () => {
+            // Do not clobber an editor installed by another extension after ours.
+            if (ui.getEditorComponent?.() === wrapped) ui.setEditorComponent?.(previous);
+          }
+        : () => {
+            // pi 0.70.6 has no getter. We installed from the default editor, so
+            // undefined is the only supported restoration target.
+            ui.setEditorComponent?.(undefined);
+          };
+    }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
-  pi.on("session_before_switch", () => {
+  pi.on("session_before_switch", async () => {
+    restoreEditor?.();
+    restoreEditor = undefined;
+    currentCtx = undefined;
+    resetCompletionState();
+    await manager.terminateAll();
     manager.clearCompleted();
+    agentActivity.clear();
+    widget.update();
     scheduler.stop();
   });
 
@@ -496,26 +574,28 @@ export default function (pi: ExtensionAPI) {
     unsubStopRpc();
     unsubPingRpc();
     currentCtx = undefined;
+    restoreEditor?.();
+    restoreEditor = undefined;
     delete (globalThis as any)[MANAGER_KEY];
     scheduler.stop();
-    manager.abortAll();
-    for (const timer of pendingNudges.values()) clearTimeout(timer);
-    pendingNudges.clear();
-    manager.dispose();
+    resetCompletionState();
+    await manager.dispose();
+    agentActivity.clear();
+    widget.dispose();
   });
 
   // Live widget: show running agents above editor
   const widget = new AgentWidget(manager, agentActivity);
 
-  function stopAllAgents(reason: "menu" | "shutdown" = "menu"): number {
+  function stopActiveAgents(): number {
     const active = manager.listAgents()
-      .filter(a => a.status === "running" || a.status === "queued")
-      .map(record => ({ record, wasQueued: record.status === "queued" }));
-    const count = manager.abortAll();
+      .filter(a => a.phase === "working" || a.phase === "queued")
+      .map(record => ({ record, wasQueued: record.phase === "queued" }));
+    const count = manager.abortActive();
     for (const { record, wasQueued } of active) {
       // Running agents will emit their terminal lifecycle event when runAgent()
       // settles; queued agents never start, so surface their stop immediately.
-      if (reason !== "shutdown" && wasQueued) {
+      if (wasQueued) {
         pi.events.emit("subagents:failed", { ...buildEventData(record), status: "stopped", error: "Stopped by user" });
       }
       agentActivity.delete(record.id);
@@ -567,8 +647,9 @@ export default function (pi: ExtensionAPI) {
         const record = manager.getRecord(id);
         if (!record) continue;
         record.groupId = groupId;
-        if (record.completedAt != null && !record.resultConsumed) {
-          groupJoin.onAgentComplete(record);
+        const turn = manager.getTurnResult(id, 1);
+        if (turn && !record.consumedGenerations.has(1)) {
+          groupJoin.onAgentComplete({ ...record, generation: 1, status: turn.status, result: turn.result, error: turn.error, startedAt: turn.startedAt, completedAt: turn.completedAt, toolUses: turn.toolUses, lifetimeUsage: { ...turn.lifetimeUsage }, compactionCount: turn.compactionCount });
         }
       }
     } else {
@@ -576,8 +657,9 @@ export default function (pi: ExtensionAPI) {
       // during the debounce window and had their notification deferred.
       for (const { id } of batchAgents) {
         const record = manager.getRecord(id);
-        if (record?.completedAt != null && !record.resultConsumed) {
-          sendIndividualNudge(record);
+        const turn = manager.getTurnResult(id, 1);
+        if (record && turn && !record.consumedGenerations.has(1)) {
+          sendIndividualNudge({ ...record, generation: 1, status: turn.status, result: turn.result, error: turn.error, startedAt: turn.startedAt, completedAt: turn.completedAt, toolUses: turn.toolUses, lifetimeUsage: { ...turn.lifetimeUsage }, compactionCount: turn.compactionCount });
         }
       }
     }
@@ -828,6 +910,9 @@ Guidelines:
     // ---- Execute ----
 
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      // Tool execution also supplies the authoritative context in print/RPC modes.
+      currentCtx = ctx;
+      widget.setConversationId(ctx.sessionManager?.getSessionId?.());
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -943,13 +1028,25 @@ Guidelines:
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
-        const record = await manager.resume(params.resume, params.prompt, signal);
-        if (!record) {
+        const turn = await manager.resume(params.resume, params.prompt, signal);
+        if (!turn) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
+        const view = {
+          ...existing,
+          id: existing.id,
+          status: turn.status,
+          result: turn.result,
+          error: turn.error,
+          startedAt: turn.startedAt,
+          completedAt: turn.completedAt,
+          toolUses: turn.toolUses,
+          lifetimeUsage: { ...turn.lifetimeUsage },
+          compactionCount: turn.compactionCount,
+        };
         return textResult(
-          record.result?.trim() || record.error?.trim() || "No output.",
-          buildDetails(detailBase, record),
+          turn.result?.trim() || turn.error?.trim() || "No output.",
+          buildDetails(detailBase, view),
         );
       }
 
@@ -1106,10 +1203,7 @@ Guidelines:
       clearInterval(spinnerInterval);
 
       // Clean up foreground agent from widget
-      if (fgId) {
-        agentActivity.delete(fgId);
-        widget.markFinished(fgId);
-      }
+      if (fgId) widget.markFinished(fgId);
 
       // Get final token count
       const tokenText = formatLifetimeTokens(fgState);
@@ -1163,18 +1257,20 @@ Guidelines:
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      // Wait for completion if requested.
-      // Pre-mark resultConsumed BEFORE awaiting: onComplete fires inside .then()
-      // (attached earlier at spawn time) and always runs before this await resumes.
-      // Setting the flag here prevents a redundant follow-up notification.
-      if (params.wait && record.status === "running" && record.promise) {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
-        await record.promise;
+      // Capture exactly one generation before waiting so a later chat turn cannot
+      // replace the result this call asked for.
+      const generation = manager.captureGeneration(record.id)!;
+      if (params.wait && !manager.getTurnResult(record.id, generation)) {
+        manager.consumeGeneration(record.id, generation);
+        cancelNudge(`${record.id}:${generation}`);
+        cancelNudge(record.id);
+        await manager.waitForGeneration(record.id, generation);
       }
+      const turn = manager.getTurnResult(record.id, generation);
+      const view = turn ? { ...record, ...turn, id: record.id } : record;
 
       const displayName = getDisplayName(record.type);
-      const duration = formatDuration(record.startedAt, record.completedAt);
+      const duration = formatDuration(view.startedAt, view.completedAt);
       const tokens = formatLifetimeTokens(record);
       const contextPercent = getSessionContextPercent(record.session);
       const statsParts = [`Tool uses: ${record.toolUses}`];
@@ -1185,21 +1281,21 @@ Guidelines:
 
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status} | ${statsParts.join(" | ")}\n` +
+        `Type: ${displayName} | Status: ${view.status} | Generation: ${generation} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
-        output += "Agent is still running. Use wait: true or check back later.";
-      } else if (record.status === "error") {
-        output += `Error: ${record.error}`;
+      if (!turn) {
+        output += `Agent turn is ${record.phase}. Use wait: true or check back later.`;
+      } else if (turn.status === "error") {
+        output += `Error: ${turn.error}`;
       } else {
-        output += record.result?.trim() || "No output.";
+        output += turn.result?.trim() || "No output.";
       }
 
-      // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
+      if (turn) {
+        manager.consumeGeneration(record.id, generation);
+        cancelNudge(`${record.id}:${generation}`);
+        cancelNudge(record.id);
       }
 
       // Verbose: include full conversation
@@ -1220,8 +1316,7 @@ Guidelines:
     name: "steer_subagent",
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
+      "Queue a new user turn for a queued, working, or idle agent. It runs after the current prompt fully finishes.",
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The agent ID to steer (must be currently running).",
@@ -1235,20 +1330,14 @@ Guidelines:
       if (!record) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
-      if (record.status !== "running") {
-        return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
-      }
-      if (!record.session) {
-        // Session not ready yet — queue the steer for delivery once initialized
-        if (!record.pendingSteers) record.pendingSteers = [];
-        record.pendingSteers.push(params.message);
-        pi.events.emit("subagents:steered", { id: record.id, message: params.message });
-        return textResult(`Steering message queued for agent ${record.id}. It will be delivered once the session initializes.`);
+      if (record.phase === "terminated") {
+        return textResult(`Agent "${params.agent_id}" is terminated and cannot accept another turn.`);
       }
 
       try {
-        await steerAgent(record.session, params.message);
-        pi.events.emit("subagents:steered", { id: record.id, message: params.message });
+        const generation = manager.enqueueTurn(record.id, params.message);
+        if (generation == null) return textResult(`Failed to queue a turn for agent ${record.id}.`);
+        pi.events.emit("subagents:steered", { id: record.id, message: params.message, generation });
         const tokens = formatLifetimeTokens(record);
         const contextPercent = getSessionContextPercent(record.session);
         const stateParts: string[] = [];
@@ -1257,7 +1346,7 @@ Guidelines:
         if (contextPercent !== null) stateParts.push(`context ${Math.round(contextPercent)}% full`);
         if (record.compactionCount) stateParts.push(`${record.compactionCount} compaction${record.compactionCount === 1 ? "" : "s"}`);
         return textResult(
-          `Steering message sent to agent ${record.id}. The agent will process it after its current tool execution.\n` +
+          `Message queued for agent ${record.id} as generation ${generation}. It will run after earlier turns finish.\n` +
           `Current state: ${stateParts.join(" · ")}`,
         );
       } catch (err) {
@@ -1427,12 +1516,7 @@ Guidelines:
     await showRunningAgents(ctx);
   }
 
-  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
-      ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
-      return;
-    }
-
+  async function viewAgentConversation(ctx: ExtensionContext, record: AgentRecord) {
     const { ConversationViewer, VIEWPORT_HEIGHT_PCT } = await import("./ui/conversation-viewer.js");
     const session = record.session;
     const activity = agentActivity.get(record.id);
@@ -1448,7 +1532,7 @@ Guidelines:
             ctx.ui.notify(`Stopped agent ${r.id}.`, "warning");
           }
           return stopped;
-        });
+        }, (message) => manager.enqueueTurn(record.id, message));
       },
       {
         overlay: true,
@@ -1878,11 +1962,11 @@ ${systemPrompt}
         notifyApplied(ctx, `Default join mode set to ${mode}`);
       }
     } else if (choice === "Stop all running/queued agents") {
-      const active = manager.listAgents().filter(a => a.status === "running" || a.status === "queued");
-      const confirmed = await ctx.ui.confirm("Stop agents", `Stop ${active.length} running/queued background agent${active.length === 1 ? "" : "s"}?`);
+      const active = manager.listAgents().filter(a => a.phase === "working" || a.phase === "queued");
+      const confirmed = await ctx.ui.confirm("Stop agents", `Stop ${active.length} running/queued agent${active.length === 1 ? "" : "s"}?`);
       if (confirmed) {
-        const stopped = stopAllAgents("menu");
-        ctx.ui.notify(`Stopped ${stopped} background agent${stopped === 1 ? "" : "s"}.`, "warning");
+        const stopped = stopActiveAgents();
+        ctx.ui.notify(`Stopped ${stopped} running/queued agent${stopped === 1 ? "" : "s"}.`, "warning");
       }
     } else if (choice.startsWith("Scheduling")) {
       const val = await ctx.ui.select(

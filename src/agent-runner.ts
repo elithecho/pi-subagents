@@ -161,8 +161,9 @@ function getLastAssistantText(session: AgentSession): string {
  */
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
-  const onAbort = () => session.abort();
-  signal.addEventListener("abort", onAbort, { once: true });
+  const onAbort = () => { void session.abort(); };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
 }
 
@@ -401,46 +402,91 @@ export async function runAgent(
 /**
  * Send a new prompt to an existing session (resume).
  */
+export interface ResumeResult {
+  responseText: string;
+  aborted: boolean;
+  steered: boolean;
+  cancelled: boolean;
+}
+
 export async function resumeAgent(
   session: AgentSession,
   prompt: string,
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
+    onTextDelta?: (delta: string, fullText: string) => void;
+    onTurnEnd?: (turnCount: number) => void;
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+    maxTurns?: number;
     signal?: AbortSignal;
   } = {},
-): Promise<string> {
+): Promise<ResumeResult> {
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
+  const maxTurns = normalizeMaxTurns(options.maxTurns);
+  let turnCount = 0;
+  let softLimitReached = false;
+  let aborted = false;
+  let cancelled = options.signal?.aborted === true;
+  const markCancelled = () => { cancelled = true; };
+  options.signal?.addEventListener("abort", markCancelled, { once: true });
+  let currentMessageText = "";
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
-    ? session.subscribe((event: AgentSessionEvent) => {
-        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
-        if (event.type === "message_end" && event.message.role === "assistant") {
-          const u = (event.message as any).usage;
-          if (u) options.onAssistantUsage?.({
-            input: u.input ?? 0,
-            output: u.output ?? 0,
-            cacheWrite: u.cacheWrite ?? 0,
-          });
+  const unsubEvents = session.subscribe((event: AgentSessionEvent) => {
+    if (event.type === "turn_end") {
+      turnCount++;
+      options.onTurnEnd?.(turnCount);
+      if (maxTurns != null) {
+        if (!softLimitReached && turnCount >= maxTurns) {
+          softLimitReached = true;
+          void session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
+          aborted = true;
+          void session.abort();
         }
-        if (event.type === "compaction_end" && !event.aborted && event.result) {
-          options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
-        }
-      })
-    : () => {};
+      }
+    }
+    if (event.type === "message_start") currentMessageText = "";
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      currentMessageText += event.assistantMessageEvent.delta;
+      options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+    }
+    if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
+    if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      const u = (event.message as any).usage;
+      if (u) options.onAssistantUsage?.({
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        cacheWrite: u.cacheWrite ?? 0,
+      });
+    }
+    if (event.type === "compaction_end" && !event.aborted && event.result) {
+      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+    }
+  });
 
   try {
     await session.prompt(prompt);
+  } catch (err) {
+    // Session implementations commonly reject prompt() when abort wins. That
+    // is cancellation metadata for this generation, not an agent failure.
+    if (!cancelled) throw err;
   } finally {
     collector.unsubscribe();
     unsubEvents();
     cleanupAbort();
+    options.signal?.removeEventListener("abort", markCancelled);
   }
 
-  return collector.getText().trim() || getLastAssistantText(session);
+  return {
+    // A cancelled prompt owns no response. Never reuse the previous assistant turn.
+    responseText: cancelled ? "" : collector.getText().trim() || getLastAssistantText(session),
+    aborted,
+    steered: softLimitReached,
+    cancelled,
+  };
 }
 
 /**

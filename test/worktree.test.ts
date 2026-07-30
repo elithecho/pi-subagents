@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanupWorktree, createWorktree, pruneWorktrees } from "../src/worktree.js";
+import { checkpointWorktree, cleanupWorktree, createWorktree, pruneWorktrees } from "../src/worktree.js";
 
 /**
  * Helper: create a temporary git repo with an initial commit.
@@ -77,6 +77,25 @@ describe("worktree", () => {
       // Cleanup
       try { execFileSync("git", ["worktree", "remove", "--force", wt1!.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
       try { execFileSync("git", ["worktree", "remove", "--force", wt2!.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+  });
+
+  describe("checkpointWorktree", () => {
+    it("commits each turn while retaining the reusable worktree", () => {
+      const wt = createWorktree(repoDir, "reusable")!;
+      writeFileSync(join(wt.path, "turn-1.txt"), "one");
+      const first = checkpointWorktree(wt, "first turn");
+      expect(first).toMatchObject({ hasChanges: true, branch: wt.branch });
+      expect(existsSync(wt.path)).toBe(true);
+
+      writeFileSync(join(wt.path, "turn-2.txt"), "two");
+      const second = checkpointWorktree(wt, "second turn");
+      expect(second).toMatchObject({ hasChanges: true, branch: wt.branch });
+      expect(execFileSync("git", ["log", "--format=%s", "-2", wt.branch], { cwd: repoDir }).toString()).toContain("second turn");
+
+      cleanupWorktree(repoDir, wt, "done");
+      expect(existsSync(wt.path)).toBe(false);
+      execFileSync("git", ["branch", "-D", wt.branch], { cwd: repoDir, stdio: "pipe" });
     });
   });
 

@@ -6,7 +6,7 @@
  */
 
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import { type Component, Editor, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -14,7 +14,7 @@ import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
-const CHROME_LINES_BASE = 6;
+const CHROME_LINES_BASE = 9;
 const MIN_VIEWPORT = 3;
 /** Height ceiling shared by the overlay's `maxHeight` and the viewer's internal viewport cap. */
 export const VIEWPORT_HEIGHT_PCT = 70;
@@ -25,40 +25,51 @@ export class ConversationViewer implements Component {
   private unsubscribe: (() => void) | undefined;
   private lastInnerW = 0;
   private closed = false;
+  private composer: Editor;
+  private sendError: string | undefined;
 
   constructor(
     private tui: TUI,
-    private session: AgentSession,
+    private session: AgentSession | undefined,
     private record: AgentRecord,
     private activity: AgentActivity | undefined,
     private theme: Theme,
     private done: (result: undefined) => void,
     private onStop?: (record: AgentRecord) => boolean,
+    private onSend?: (message: string) => number | undefined,
   ) {
-    this.unsubscribe = session.subscribe(() => {
+    this.composer = new Editor(tui, {
+      borderColor: (s: string) => theme.fg("border", s),
+      selectList: (theme as any).selectList,
+    });
+    this.composer.onSubmit = (text) => {
+      if (!text.trim()) return;
+      const generation = this.onSend?.(text);
+      if (generation == null) {
+        // Editor clears before invoking onSubmit; restore rejected drafts.
+        this.composer.setText(text);
+        this.sendError = "Agent is no longer accepting messages.";
+      } else {
+        this.sendError = undefined;
+        this.composer.setText("");
+        this.autoScroll = true;
+      }
+      this.tui.requestRender();
+    };
+    this.unsubscribe = session?.subscribe(() => {
       if (this.closed) return;
       this.tui.requestRender();
     });
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape")) {
-      if (this.canStop()) {
-        this.onStop?.(this.record);
-        this.tui.requestRender();
-      }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+b")) {
       this.closed = true;
       this.done(undefined);
       return;
     }
 
-    if (matchesKey(data, "q")) {
-      this.closed = true;
-      this.done(undefined);
-      return;
-    }
-
-    if ((matchesKey(data, "x") || data === "X") && this.canStop()) {
+    if (matchesKey(data, "ctrl+x") && this.canStop()) {
       this.onStop?.(this.record);
       this.tui.requestRender();
       return;
@@ -68,16 +79,16 @@ export class ConversationViewer implements Component {
     const viewportHeight = this.viewportHeight();
     const maxScroll = Math.max(0, totalLines - viewportHeight);
 
-    if (matchesKey(data, "up") || matchesKey(data, "k")) {
+    if (matchesKey(data, "shift+up")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - 1);
-      this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
+      this.autoScroll = false;
+    } else if (matchesKey(data, "shift+down")) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
       this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "ctrl+u") || matchesKey(data, "shift+up")) {
+    } else if (matchesKey(data, "pageUp")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - viewportHeight);
       this.autoScroll = false;
-    } else if (matchesKey(data, "ctrl+d") || matchesKey(data, "shift+down")) {
+    } else if (matchesKey(data, "pageDown")) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + viewportHeight);
       this.autoScroll = this.scrollOffset >= maxScroll;
     } else if (matchesKey(data, "home")) {
@@ -86,6 +97,8 @@ export class ConversationViewer implements Component {
     } else if (matchesKey(data, "end")) {
       this.scrollOffset = maxScroll;
       this.autoScroll = true;
+    } else {
+      this.composer.handleInput(data);
     }
   }
 
@@ -152,14 +165,20 @@ export class ConversationViewer implements Component {
       lines.push(row(visible[i] ?? ""));
     }
 
+    // Composer
+    lines.push(hrMid);
+    lines.push(row(th.fg("accent", "Message child")));
+    for (const editorLine of this.composer.render(innerW)) lines.push(row(editorLine));
+    if (this.sendError) lines.push(row(th.fg("error", this.sendError)));
+
     // Footer
     lines.push(hrMid);
     const scrollPct = contentLines.length <= viewportHeight
       ? "100%"
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const stopHint = this.canStop() ? " · Esc/x stop · q close" : " · Esc/q close";
-    const footerRight = th.fg("dim", `↑↓ scroll · Ctrl+U/D or Shift+↑↓${stopHint}`);
+    const stopHint = this.canStop() ? " · Ctrl+X stop" : "";
+    const footerRight = th.fg("dim", `Enter send · Shift+Enter newline · Ctrl+B/Esc close${stopHint}`);
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);
@@ -187,11 +206,11 @@ export class ConversationViewer implements Component {
   }
 
   private chromeLines(): number {
-    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0);
+    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.sendError ? 1 : 0);
   }
 
   private canStop(): boolean {
-    return this.record.status === "running" || this.record.status === "queued";
+    return this.record.phase !== "terminated";
   }
 
   private invocationLine(): string | undefined {
@@ -208,7 +227,7 @@ export class ConversationViewer implements Component {
     const safeLine = (line: string) => truncateToWidth(normalizeTabs(line), width);
 
     const th = this.theme;
-    const messages = this.session.messages;
+    const messages = (this.session ?? this.record.session)?.messages ?? [];
     const lines: string[] = [];
 
     if (messages.length === 0) {

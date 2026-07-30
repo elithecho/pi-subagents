@@ -184,7 +184,18 @@ describe("agent-runner final output capture", () => {
 
     const result = await resumeAgent(session as any, "Continue");
 
-    expect(result).toBe("RESUMED");
+    expect(result).toEqual({ responseText: "RESUMED", aborted: false, steered: false, cancelled: false });
+  });
+
+  it("forwards an already-aborted signal before prompting a resumed session", async () => {
+    const { session } = createSession("ignored");
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await resumeAgent(session as any, "Continue", { signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ responseText: "", cancelled: true });
   });
 
   it("sets the agent name as session name before binding extensions", async () => {

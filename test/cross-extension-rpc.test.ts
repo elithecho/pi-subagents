@@ -99,6 +99,20 @@ describe("cross-extension RPC", () => {
       );
     });
 
+    it("normalizes documented run_in_background to manager isBackground", async () => {
+      registerRpcHandlers(deps);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-background", type: "Explore", prompt: "find it",
+        options: { description: "search", run_in_background: true },
+      });
+
+      await vi.waitFor(() => expect(manager.spawn).toHaveBeenCalled());
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "Explore", "find it",
+        { description: "search", isBackground: true },
+      );
+    });
+
     it("returns error when no active session", async () => {
       ctx = undefined;
       registerRpcHandlers(deps);

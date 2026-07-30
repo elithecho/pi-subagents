@@ -83,7 +83,7 @@ beforeEach(() => {
 
 describe("ConversationViewer", () => {
   describe("input handling", () => {
-    it("stops and closes a running agent on Escape", () => {
+    it("closes without stopping a running agent on Escape", () => {
       const done = vi.fn();
       const onStop = vi.fn(() => true);
       const tui = mockTui();
@@ -94,13 +94,11 @@ describe("ConversationViewer", () => {
 
       viewer.handleInput("\u001b");
 
-      expect(onStop).toHaveBeenCalledOnce();
-      expect(onStop).toHaveBeenCalledWith(record);
+      expect(onStop).not.toHaveBeenCalled();
       expect(done).toHaveBeenCalledOnce();
-      expect(tui.requestRender).toHaveBeenCalledOnce();
     });
 
-    it("closes without stopping a running agent on q", () => {
+    it("closes without stopping a running agent on Ctrl+B", () => {
       const done = vi.fn();
       const onStop = vi.fn(() => true);
       const record = mockRecord({ status: "running" });
@@ -108,10 +106,49 @@ describe("ConversationViewer", () => {
         mockTui(), mockSession([]), record, undefined, ansiTheme(), done, onStop,
       );
 
-      viewer.handleInput("q");
+      viewer.handleInput("\u0002");
 
       expect(onStop).not.toHaveBeenCalled();
       expect(done).toHaveBeenCalledOnce();
+    });
+
+    it("sends composer text on Enter", () => {
+      const onSend = vi.fn(() => 2);
+      const viewer = new ConversationViewer(
+        mockTui(), mockSession([]), mockRecord(), undefined, ansiTheme(), vi.fn(), undefined, onSend,
+      );
+
+      viewer.handleInput("h");
+      viewer.handleInput("i");
+      viewer.handleInput("\r");
+
+      expect(onSend).toHaveBeenCalledWith("hi");
+    });
+
+    it("retains the composer draft when the manager rejects the turn", () => {
+      const viewer = new ConversationViewer(
+        mockTui(), mockSession([]), mockRecord(), undefined, ansiTheme(), vi.fn(), undefined, () => undefined,
+      );
+      viewer.handleInput("n");
+      viewer.handleInput("o");
+      viewer.handleInput("\r");
+
+      expect((viewer as any).composer.getText()).toBe("no");
+      expect(viewer.render(80).join("\n")).toContain("no longer accepting");
+    });
+
+    it("stops only on Ctrl+X", () => {
+      const done = vi.fn();
+      const onStop = vi.fn(() => true);
+      const record = mockRecord({ status: "running" });
+      const viewer = new ConversationViewer(
+        mockTui(), mockSession([]), record, undefined, ansiTheme(), done, onStop,
+      );
+
+      viewer.handleInput("\u0018");
+
+      expect(onStop).toHaveBeenCalledWith(record);
+      expect(done).not.toHaveBeenCalled();
     });
 
     it("does not call stop on Escape for a completed agent", () => {

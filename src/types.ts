@@ -57,11 +57,31 @@ export interface AgentConfig {
 
 export type JoinMode = 'async' | 'group' | 'smart';
 
+export type AgentPhase = "queued" | "working" | "idle" | "terminated";
+export type AgentTurnStatus = "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
+
+/** Immutable data for one prompt generation. */
+export interface AgentTurnSnapshot {
+  agentId: string;
+  generation: number;
+  status: AgentTurnStatus;
+  result?: string;
+  error?: string;
+  startedAt: number;
+  completedAt: number;
+  toolUses: number;
+  lifetimeUsage: Readonly<LifetimeUsage>;
+  compactionCount: number;
+}
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;
   description: string;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
+  /** Agent lifetime. `status` remains the latest-turn compatibility view. */
+  phase: AgentPhase;
+  status: AgentTurnStatus;
+  generation: number;
   result?: string;
   error?: string;
   toolUses: number;
@@ -72,10 +92,12 @@ export interface AgentRecord {
   promise?: Promise<string>;
   groupId?: string;
   joinMode?: JoinMode;
-  /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
+  /** Set when the latest result was consumed (legacy compatibility). */
   resultConsumed?: boolean;
-  /** Steering messages queued before the session was ready. */
-  pendingSteers?: string[];
+  /** Completed generations, retained for race-free waits and notifications. */
+  turnResults: Map<number, AgentTurnSnapshot>;
+  /** Result consumption is keyed by generation. */
+  consumedGenerations: Set<number>;
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string };
   /** Worktree cleanup result after agent completion. */

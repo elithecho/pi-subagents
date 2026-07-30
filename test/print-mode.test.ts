@@ -70,12 +70,27 @@ describe("print mode background notifications", () => {
     vi.useRealTimers();
   });
 
+  it("installs and restores editor navigation with setEditorComponent-only UI", async () => {
+    const { pi, handlers } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeHeadlessCtx();
+    ctx.ui.setEditorComponent = vi.fn();
+
+    await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+
+    expect(ctx.ui.setEditorComponent).toHaveBeenCalledWith(expect.any(Function));
+    await handlers.get("session_shutdown")?.({}, ctx);
+    expect(ctx.ui.setEditorComponent).toHaveBeenLastCalledWith(undefined);
+  });
+
   it("background Agent runs are stopped when the parent tool signal aborts", async () => {
     const controller = new AbortController();
-    const session = { dispose: vi.fn(), abort: vi.fn().mockResolvedValue(undefined), abortBash: vi.fn() };
+    let release!: () => void;
+    const stopped = new Promise<void>(resolve => { release = resolve; });
+    const session = { dispose: vi.fn(), abort: vi.fn(async () => release()), abortBash: vi.fn() };
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       opts.onSessionCreated?.(session);
-      await new Promise(() => {});
+      await stopped;
       return { responseText: "", session: session as any, aborted: true, steered: false };
     });
 

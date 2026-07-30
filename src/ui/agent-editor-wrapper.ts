@@ -1,0 +1,121 @@
+import { CustomEditor } from "@mariozechner/pi-coding-agent";
+import { type EditorComponent, type EditorTheme, isKeyRelease, matchesKey, type TUI } from "@mariozechner/pi-tui";
+import type { AgentRecord } from "../types.js";
+import type { AgentWidget } from "./agent-widget.js";
+
+export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: any) => EditorComponent;
+
+/** Editor-only agent navigation; it never receives input while another overlay owns focus. */
+export class AgentNavigationEditor implements EditorComponent {
+  private listFocused = false;
+  private opening = false;
+
+  constructor(
+    private base: EditorComponent,
+    private widget: AgentWidget,
+    private openAgent: (record: AgentRecord) => Promise<void>,
+  ) {}
+
+  // Preserve TUI focus/cursor and Kitty key-release behavior through the proxy.
+  get focused(): boolean { return "focused" in this.base ? Boolean((this.base as any).focused) : false; }
+  set focused(value: boolean) {
+    if ("focused" in this.base) (this.base as any).focused = value;
+  }
+  get wantsKeyRelease(): boolean | undefined { return this.base.wantsKeyRelease; }
+  set wantsKeyRelease(value: boolean | undefined) { this.base.wantsKeyRelease = value; }
+
+  // Preserve CustomEditor duck-typed app bindings when wrapping it.
+  get actionHandlers() { return (this.base as any).actionHandlers; }
+  get onEscape() { return (this.base as any).onEscape; }
+  set onEscape(value) { (this.base as any).onEscape = value; }
+  get onCtrlD() { return (this.base as any).onCtrlD; }
+  set onCtrlD(value) { (this.base as any).onCtrlD = value; }
+  get onPasteImage() { return (this.base as any).onPasteImage; }
+  set onPasteImage(value) { (this.base as any).onPasteImage = value; }
+  get onExtensionShortcut() { return (this.base as any).onExtensionShortcut; }
+  set onExtensionShortcut(value) { (this.base as any).onExtensionShortcut = value; }
+
+  get onSubmit() { return this.base.onSubmit; }
+  set onSubmit(value) { this.base.onSubmit = value; }
+  get onChange() { return this.base.onChange; }
+  set onChange(value) { this.base.onChange = value; }
+  get borderColor() { return this.base.borderColor; }
+  set borderColor(value) { this.base.borderColor = value; }
+
+  render(width: number): string[] { return this.base.render(width); }
+  invalidate(): void { this.base.invalidate(); }
+  getText(): string { return this.base.getText(); }
+  setText(text: string): void { this.base.setText(text); }
+  addToHistory(text: string): void { this.base.addToHistory?.(text); }
+  insertTextAtCursor(text: string): void { this.base.insertTextAtCursor?.(text); }
+  getExpandedText(): string { return this.base.getExpandedText?.() ?? this.base.getText(); }
+  setAutocompleteProvider(provider: Parameters<NonNullable<EditorComponent["setAutocompleteProvider"]>>[0]): void {
+    this.base.setAutocompleteProvider?.(provider);
+  }
+  setPaddingX(padding: number): void { this.base.setPaddingX?.(padding); }
+  setAutocompleteMaxVisible(maxVisible: number): void { this.base.setAutocompleteMaxVisible?.(maxVisible); }
+
+  handleInput(data: string): void {
+    if (isKeyRelease(data)) {
+      const ownsRelease = this.base.getText() === "" && (
+        (!this.listFocused && matchesKey(data, "down")) ||
+        (this.listFocused && (
+          matchesKey(data, "up") || matchesKey(data, "down") ||
+          matchesKey(data, "enter") || matchesKey(data, "escape")
+        ))
+      );
+      if (!ownsRelease) this.base.handleInput(data);
+      return;
+    }
+
+    if (this.base.getText() !== "") {
+      this.leaveList();
+      this.base.handleInput(data);
+      return;
+    }
+
+    if (!this.listFocused) {
+      if (matchesKey(data, "down") && this.widget.focusList()) {
+        this.listFocused = true;
+        return;
+      }
+      this.base.handleInput(data);
+      return;
+    }
+
+    if (matchesKey(data, "escape")) {
+      this.leaveList();
+      return;
+    }
+    if (matchesKey(data, "up")) { this.widget.moveSelection(-1); return; }
+    if (matchesKey(data, "down")) { this.widget.moveSelection(1); return; }
+    if (matchesKey(data, "enter")) {
+      const record = this.widget.selectedAgent();
+      if (record && !this.opening) {
+        this.opening = true;
+        void this.openAgent(record).finally(() => { this.opening = false; });
+      }
+      return;
+    }
+
+    this.leaveList();
+    this.base.handleInput(data);
+  }
+
+  private leaveList(): void {
+    if (!this.listFocused) return;
+    this.listFocused = false;
+    this.widget.leaveList();
+  }
+}
+
+export function wrapEditorFactory(
+  previous: EditorFactory | undefined,
+  widget: AgentWidget,
+  openAgent: (record: AgentRecord) => Promise<void>,
+): EditorFactory {
+  return (tui, theme, keybindings) => {
+    const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+    return new AgentNavigationEditor(base, widget, openAgent);
+  };
+}

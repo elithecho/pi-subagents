@@ -5,7 +5,7 @@
  * Uses the callback form of setWidget for themed rendering.
  */
 
-import { truncateToWidth } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType } from "../types.js";
@@ -42,6 +42,8 @@ export type Theme = {
 
 export type UICtx = {
   setStatus(key: string, text: string | undefined): void;
+  getEditorText?(): string;
+  onTerminalInput?(handler: (data: string) => { consume?: boolean } | undefined): () => void;
   setWidget(
     key: string,
     content: undefined | ((tui: any, theme: Theme) => { render(): string[]; invalidate(): void }),
@@ -220,6 +222,8 @@ export class AgentWidget {
   private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
+  private conversationId: string | undefined;
+  private selected = -1;
 
   constructor(
     private manager: AgentManager,
@@ -236,6 +240,42 @@ export class AgentWidget {
       this.tui = undefined;
       this.lastStatusText = undefined;
     }
+  }
+
+  setConversationId(id: string | undefined) { this.conversationId = id; this.selected = -1; this.update(); }
+
+  activeAgents() {
+    return this.manager.listAgents(this.conversationId).filter(a => a.phase !== "terminated");
+  }
+
+  focusList(): boolean {
+    if (this.activeAgents().length === 0) return false;
+    this.selected = 0;
+    this.update();
+    return true;
+  }
+
+  leaveList(): void { this.selected = -1; this.update(); }
+
+  moveSelection(delta: -1 | 1): void {
+    const agents = this.activeAgents();
+    if (agents.length === 0) { this.leaveList(); return; }
+    this.selected = Math.max(0, Math.min(agents.length - 1, this.selected + delta));
+    this.update();
+  }
+
+  selectedAgent() { return this.selected >= 0 ? this.activeAgents()[this.selected] : undefined; }
+
+  /** Compatibility helper used by focused-list tests. */
+  handleListInput(data: string) {
+    if (matchesKey(data, "down")) {
+      if (this.selected < 0) this.focusList(); else this.moveSelection(1);
+      return { consumed: this.selected >= 0, record: undefined };
+    }
+    if (matchesKey(data, "up") && this.selected >= 0) { this.moveSelection(-1); return { consumed: true as const }; }
+    if (matchesKey(data, "enter")) return { consumed: this.selected >= 0, record: this.selectedAgent() };
+    if (matchesKey(data, "escape") && this.selected >= 0) { this.leaveList(); return { consumed: true as const }; }
+    return { consumed: false as const };
   }
 
   /**
@@ -314,12 +354,12 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.manager.listAgents();
-    const running = allAgents.filter(a => a.status === "running");
-    const queued = allAgents.filter(a => a.status === "queued");
+    const allAgents = this.manager.listAgents(this.conversationId);
+    const running = allAgents.filter(a => a.phase === "working");
+    const queued = allAgents.filter(a => a.phase === "queued");
     const finished = allAgents.filter(a =>
-      a.status !== "running" && a.status !== "queued" && a.completedAt
-      && this.shouldShowFinished(a.id, a.status),
+      a.phase === "idle" && a.completedAt
+      && (a.phase === "idle" || this.shouldShowFinished(a.id, a.status)),
     );
 
     const hasActive = running.length > 0 || queued.length > 0;
@@ -339,7 +379,8 @@ export class AgentWidget {
 
     const finishedLines: string[] = [];
     for (const a of finished) {
-      finishedLines.push(truncate(theme.fg("dim", "├─") + " " + this.renderFinishedLine(a, theme)));
+      const selected = this.activeAgents()[this.selected]?.id === a.id ? theme.fg("accent", "›") : " ";
+      finishedLines.push(truncate(theme.fg("dim", "├─") + selected + this.renderFinishedLine(a, theme)));
     }
 
     const runningLines: string[][] = []; // each entry is [header, activity]
@@ -364,19 +405,21 @@ export class AgentWidget {
 
       const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
 
+      const selected = this.activeAgents()[this.selected]?.id === a.id ? theme.fg("accent", "›") : " ";
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + selected + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }
 
-    const queuedLine = queued.length > 0
-      ? truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.fg("dim", `${queued.length} queued`)}`)
-      : undefined;
+    const queuedLines = queued.map(a => {
+      const selected = this.activeAgents()[this.selected]?.id === a.id ? theme.fg("accent", "›") : " ";
+      return truncate(theme.fg("dim", "├─") + selected + ` ${theme.fg("muted", "◦")} ${theme.fg("dim", `${getDisplayName(a.type)}  ${a.description} · queued`)}`);
+    });
 
     // Assemble with overflow cap (heading + overflow indicator = 2 reserved lines).
     const maxBody = MAX_WIDGET_LINES - 1; // heading takes 1 line
-    const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
+    const totalBody = finishedLines.length + runningLines.length * 2 + queuedLines.length;
 
     const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
 
@@ -384,7 +427,7 @@ export class AgentWidget {
       // Everything fits — add all lines and fix up connectors for the last item.
       lines.push(...finishedLines);
       for (const pair of runningLines) lines.push(...pair);
-      if (queuedLine) lines.push(queuedLine);
+      lines.push(...queuedLines);
 
       // Fix last connector: swap ├─ → └─ and │ → space for activity lines.
       if (lines.length > 1) {
@@ -392,7 +435,7 @@ export class AgentWidget {
         lines[last] = lines[last].replace("├─", "└─");
         // If last item is a running agent activity line, fix indent of that line
         // and fix the header line above it.
-        if (runningLines.length > 0 && !queuedLine) {
+        if (runningLines.length > 0 && queuedLines.length === 0) {
           // The last two lines are the last running agent's header + activity.
           if (last >= 2) {
             lines[last - 1] = lines[last - 1].replace("├─", "└─");
@@ -405,6 +448,7 @@ export class AgentWidget {
       // Reserve 1 line for overflow indicator.
       let budget = maxBody - 1;
       let hiddenRunning = 0;
+      let hiddenQueued = 0;
       let hiddenFinished = 0;
 
       // 1. Running agents (2 lines each)
@@ -417,10 +461,10 @@ export class AgentWidget {
         }
       }
 
-      // 2. Queued line
-      if (queuedLine && budget >= 1) {
-        lines.push(queuedLine);
-        budget--;
+      // 2. Queued agents
+      for (const queuedLine of queuedLines) {
+        if (budget >= 1) { lines.push(queuedLine); budget--; }
+        else hiddenQueued++;
       }
 
       // 3. Finished agents
@@ -436,9 +480,10 @@ export class AgentWidget {
       // Overflow summary
       const overflowParts: string[] = [];
       if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
+      if (hiddenQueued > 0) overflowParts.push(`${hiddenQueued} queued`);
       if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
       const overflowText = overflowParts.join(", ");
-      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`)
+      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenQueued + hiddenFinished} more (${overflowText})`)}`)
       );
     }
 
@@ -448,18 +493,23 @@ export class AgentWidget {
   /** Force an immediate widget update. */
   update() {
     if (!this.uiCtx) return;
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.manager.listAgents(this.conversationId);
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
     let queuedCount = 0;
     let hasFinished = false;
     for (const a of allAgents) {
-      if (a.status === "running") { runningCount++; }
-      else if (a.status === "queued") { queuedCount++; }
-      else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
+      if (a.phase === "working") { runningCount++; }
+      else if (a.phase === "queued") { queuedCount++; }
+      else if (a.phase === "idle" && a.completedAt) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
+    // Idle sessions stay visible, but their static rows need no animation loop.
+    if (!hasActive && this.widgetInterval) {
+      clearInterval(this.widgetInterval);
+      this.widgetInterval = undefined;
+    }
 
     // Nothing to show — clear widget
     if (!hasActive && !hasFinished) {

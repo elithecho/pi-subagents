@@ -26,6 +26,8 @@ export interface WorktreeCleanupResult {
   branch?: string;
   /** Worktree path if it was kept. */
   path?: string;
+  /** Checkpoint failure detail; cleanup remains best-effort. */
+  error?: string;
 }
 
 /**
@@ -56,6 +58,31 @@ export function createWorktree(cwd: string, agentId: string): WorktreeInfo | und
   } catch {
     // If worktree creation fails, return undefined (agent runs in normal cwd)
     return undefined;
+  }
+}
+
+/** Commit a turn's changes and update its mergeable branch without removing the reusable worktree. */
+export function checkpointWorktree(
+  worktree: WorktreeInfo,
+  agentDescription: string,
+): WorktreeCleanupResult {
+  if (!existsSync(worktree.path)) return { hasChanges: false };
+  try {
+    const status = execFileSync("git", ["status", "--porcelain"], {
+      cwd: worktree.path, stdio: "pipe", timeout: 10000,
+    }).toString().trim();
+    if (!status) return { hasChanges: false };
+
+    execFileSync("git", ["add", "-A"], { cwd: worktree.path, stdio: "pipe", timeout: 10000 });
+    execFileSync("git", ["commit", "-m", `pi-agent: ${agentDescription.slice(0, 200)}`], {
+      cwd: worktree.path, stdio: "pipe", timeout: 10000,
+    });
+    execFileSync("git", ["branch", "-f", worktree.branch, "HEAD"], {
+      cwd: worktree.path, stdio: "pipe", timeout: 5000,
+    });
+    return { hasChanges: true, branch: worktree.branch, path: worktree.path };
+  } catch (err) {
+    return { hasChanges: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
