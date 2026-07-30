@@ -9,11 +9,15 @@ export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: any) => 
 export class AgentNavigationEditor implements EditorComponent {
   private listFocused = false;
   private opening = false;
+  private ctrlBTransitionActive = false;
 
   constructor(
     private base: EditorComponent,
     private widget: AgentWidget,
     private openAgent: (record: AgentRecord) => Promise<void>,
+    private hasPendingMessages: () => boolean = () => false,
+    private waitForIdle: () => Promise<boolean> = async () => true,
+    private submitRestoredMessage: (text: string) => boolean | Promise<boolean> = () => false,
   ) {}
 
   // Preserve TUI focus/cursor and Kitty key-release behavior through the proxy.
@@ -68,6 +72,19 @@ export class AgentNavigationEditor implements EditorComponent {
       return;
     }
 
+    if (matchesKey(data, "ctrl+b")) {
+      if (this.ctrlBTransitionActive) return;
+      if (this.hasPendingMessages()) {
+        const onEscape = this.onEscape;
+        if (typeof onEscape === "function") {
+          this.leaveList();
+          this.ctrlBTransitionActive = true;
+          void this.interruptAndSubmitRestored(onEscape);
+          return;
+        }
+      }
+    }
+
     if (this.base.getText() !== "") {
       this.leaveList();
       this.base.handleInput(data);
@@ -102,6 +119,25 @@ export class AgentNavigationEditor implements EditorComponent {
     this.base.handleInput(data);
   }
 
+  private async interruptAndSubmitRestored(onEscape: () => void): Promise<void> {
+    try {
+      const before = this.base.getText();
+      onEscape();
+      const restored = this.base.getText();
+      if (restored.trim() === "" || restored === before) return;
+
+      const active = await this.waitForIdle();
+      if (!active || this.base.getText() !== restored) return;
+
+      const submitted = await this.submitRestoredMessage(restored);
+      if (submitted && this.base.getText() === restored) this.base.setText("");
+    } catch {
+      // Submission is fire-and-forget; leave restored text available for retry.
+    } finally {
+      this.ctrlBTransitionActive = false;
+    }
+  }
+
   private leaveList(): void {
     if (!this.listFocused) return;
     this.listFocused = false;
@@ -113,9 +149,12 @@ export function wrapEditorFactory(
   previous: EditorFactory | undefined,
   widget: AgentWidget,
   openAgent: (record: AgentRecord) => Promise<void>,
+  hasPendingMessages: () => boolean = () => false,
+  waitForIdle: () => Promise<boolean> = async () => true,
+  submitRestoredMessage: (text: string) => boolean | Promise<boolean> = () => false,
 ): EditorFactory {
   return (tui, theme, keybindings) => {
     const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
-    return new AgentNavigationEditor(base, widget, openAgent);
+    return new AgentNavigationEditor(base, widget, openAgent, hasPendingMessages, waitForIdle, submitRestoredMessage);
   };
 }

@@ -529,7 +529,23 @@ export default function (pi: ExtensionAPI) {
     const ui = ctx.ui as EditorUI;
     if (ui.setEditorComponent) {
       const previous = ui.getEditorComponent?.();
-      const wrapped = wrapEditorFactory(previous, widget, record => viewAgentConversation(ctx, record));
+      const wrapped = wrapEditorFactory(
+        previous,
+        widget,
+        record => viewAgentConversation(ctx, record),
+        () => ctx.hasPendingMessages(),
+        async () => {
+          while (currentCtx === ctx && !ctx.isIdle()) {
+            await new Promise<void>(resolve => setTimeout(resolve, 10));
+          }
+          return currentCtx === ctx;
+        },
+        async text => {
+          if (currentCtx !== ctx) return false;
+          pi.sendUserMessage(text, { deliverAs: "steer" });
+          return true;
+        },
+      );
       ui.setEditorComponent(wrapped);
       restoreEditor = ui.getEditorComponent
         ? () => {
