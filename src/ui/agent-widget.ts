@@ -8,7 +8,7 @@
 import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { AgentInvocation, SubagentType } from "../types.js";
+import type { AgentInvocation, AgentRecord, SubagentType } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -244,12 +244,18 @@ export class AgentWidget {
 
   setConversationId(id: string | undefined) { this.conversationId = id; this.selected = -1; this.update(); }
 
+  private isVisibleAgent(a: AgentRecord): boolean {
+    return a.phase === "working"
+      || a.phase === "queued"
+      || (a.phase === "idle" && a.completedAt != null && this.shouldShowFinished(a.id, a.status));
+  }
+
   activeAgents() {
-    return this.manager.listAgents(this.conversationId).filter(a => a.phase !== "terminated");
+    return this.manager.listAgents(this.conversationId).filter(a => this.isVisibleAgent(a));
   }
 
   focusList(): boolean {
-    if (this.activeAgents().length === 0) return false;
+    if (this.activeAgents().length === 0) { this.selected = -1; return false; }
     this.selected = 0;
     this.update();
     return true;
@@ -273,7 +279,10 @@ export class AgentWidget {
       return { consumed: this.selected >= 0, record: undefined };
     }
     if (matchesKey(data, "up") && this.selected >= 0) { this.moveSelection(-1); return { consumed: true as const }; }
-    if (matchesKey(data, "enter")) return { consumed: this.selected >= 0, record: this.selectedAgent() };
+    if (matchesKey(data, "enter")) {
+      const record = this.selectedAgent();
+      return { consumed: record !== undefined, record };
+    }
     if (matchesKey(data, "escape") && this.selected >= 0) { this.leaveList(); return { consumed: true as const }; }
     return { consumed: false as const };
   }
@@ -307,9 +316,7 @@ export class AgentWidget {
 
   /** Record an agent as finished (call when agent completes). */
   markFinished(agentId: string) {
-    if (!this.finishedTurnAge.has(agentId)) {
-      this.finishedTurnAge.set(agentId, 0);
-    }
+    this.finishedTurnAge.set(agentId, 0);
   }
 
   /** Render a finished agent line. */
@@ -354,13 +361,10 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.manager.listAgents(this.conversationId);
-    const running = allAgents.filter(a => a.phase === "working");
-    const queued = allAgents.filter(a => a.phase === "queued");
-    const finished = allAgents.filter(a =>
-      a.phase === "idle" && a.completedAt
-      && (a.phase === "idle" || this.shouldShowFinished(a.id, a.status)),
-    );
+    const visibleAgents = this.manager.listAgents(this.conversationId).filter(a => this.isVisibleAgent(a));
+    const running = visibleAgents.filter(a => a.phase === "working");
+    const queued = visibleAgents.filter(a => a.phase === "queued");
+    const finished = visibleAgents.filter(a => a.phase === "idle");
 
     const hasActive = running.length > 0 || queued.length > 0;
     const hasFinished = finished.length > 0;
@@ -494,18 +498,20 @@ export class AgentWidget {
   update() {
     if (!this.uiCtx) return;
     const allAgents = this.manager.listAgents(this.conversationId);
+    const visibleAgents = allAgents.filter(a => this.isVisibleAgent(a));
+    if (this.selected >= visibleAgents.length) this.selected = visibleAgents.length - 1;
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
     let queuedCount = 0;
     let hasFinished = false;
-    for (const a of allAgents) {
+    for (const a of visibleAgents) {
       if (a.phase === "working") { runningCount++; }
       else if (a.phase === "queued") { queuedCount++; }
-      else if (a.phase === "idle" && a.completedAt) { hasFinished = true; }
+      else if (a.phase === "idle") { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
-    // Idle sessions stay visible, but their static rows need no animation loop.
+    // Visible idle sessions need no animation loop.
     if (!hasActive && this.widgetInterval) {
       clearInterval(this.widgetInterval);
       this.widgetInterval = undefined;

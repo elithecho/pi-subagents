@@ -9,6 +9,7 @@ import { addUsage } from "./usage.js";
 import { checkpointWorktree, cleanupWorktree, createWorktree, pruneWorktrees } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord, turn: AgentTurnSnapshot) => void;
+export type OnAgentSettled = (record: AgentRecord, turn: AgentTurnSnapshot) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
@@ -47,14 +48,16 @@ export class AgentManager {
   private activeTasks = new Map<string, Promise<void>>();
   private snapshots = new Map<string, AgentTurnSnapshot>();
   private onComplete?: OnAgentComplete;
+  private onSettled?: OnAgentSettled;
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private maxConcurrent: number;
   /** Compatibility handle only; no idle-record cleanup is performed. */
   private cleanupInterval: ReturnType<typeof setInterval>;
 
-  constructor(onComplete?: OnAgentComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart?: OnAgentStart, onCompact?: OnAgentCompact) {
+  constructor(onComplete?: OnAgentComplete, maxConcurrent = DEFAULT_MAX_CONCURRENT, onStart?: OnAgentStart, onCompact?: OnAgentCompact, onSettled?: OnAgentSettled) {
     this.onComplete = onComplete;
+    this.onSettled = onSettled;
     this.onStart = onStart;
     this.onCompact = onCompact;
     this.maxConcurrent = maxConcurrent;
@@ -347,6 +350,7 @@ export class AgentManager {
       deferred.settled = true;
       deferred.resolve(result ?? "");
     }
+    try { this.onSettled?.(record, snapshot); } catch { /* settlement side effects are isolated */ }
     if (notify) {
       try { this.onComplete?.(record, snapshot); } catch { /* completion side effects are isolated */ }
     }

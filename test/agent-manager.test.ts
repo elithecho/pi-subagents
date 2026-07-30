@@ -116,6 +116,27 @@ describe("AgentManager — completion callbacks", () => {
     manager?.dispose();
   });
 
+  it("fires settlement exactly once when an active abort later quiesces", async () => {
+    let release!: () => void;
+    vi.mocked(runAgent).mockImplementation(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { responseText: "late result", session: mockSession(), aborted: false, steered: false };
+    });
+    const settled = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, settled);
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    manager.abort(id);
+    expect(settled).toHaveBeenCalledOnce();
+
+    release();
+    await vi.waitFor(() => expect(manager.hasRunning()).toBe(false));
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
   it("does not let onComplete errors turn a completed agent into a failed run", async () => {
     manager = new AgentManager(() => {
       throw new Error("stale extension context");

@@ -314,7 +314,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   function sendIndividualNudge(record: AgentRecord) {
-    widget.markFinished(record.id);
     scheduleNudge(`${record.id}:${record.generation}`, () => emitIndividualNudge(record));
     widget.update();
   }
@@ -322,8 +321,6 @@ export default function (pi: ExtensionAPI) {
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
-      for (const r of records) widget.markFinished(r.id);
-
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
       scheduleNudge(groupKey, () => {
         // Re-check at send time
@@ -412,7 +409,6 @@ export default function (pi: ExtensionAPI) {
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
-      widget.markFinished(record.id);
       widget.update();
       return;
     }
@@ -460,6 +456,10 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
+  }, (record) => {
+    // Every retained turn settles here exactly once, independently of notification delivery.
+    widget.markFinished(record.id);
+    widget.update();
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -599,7 +599,6 @@ export default function (pi: ExtensionAPI) {
         pi.events.emit("subagents:failed", { ...buildEventData(record), status: "stopped", error: "Stopped by user" });
       }
       agentActivity.delete(record.id);
-      widget.markFinished(record.id);
     }
     widget.update();
     return count;
@@ -1137,7 +1136,6 @@ Guidelines:
       // Foreground (synchronous) execution — stream progress via onUpdate
       let spinnerFrame = 0;
       const startedAt = Date.now();
-      let fgId: string | undefined;
 
       const streamUpdate = () => {
         const details: AgentDetails = {
@@ -1165,7 +1163,6 @@ Guidelines:
         origOnSession(session);
         for (const a of manager.listAgents()) {
           if (a.session === session) {
-            fgId = a.id;
             agentActivity.set(a.id, fgState);
             widget.ensureTimer();
             break;
@@ -1201,9 +1198,6 @@ Guidelines:
       }
 
       clearInterval(spinnerInterval);
-
-      // Clean up foreground agent from widget
-      if (fgId) widget.markFinished(fgId);
 
       // Get final token count
       const tokenText = formatLifetimeTokens(fgState);
@@ -1527,8 +1521,6 @@ Guidelines:
           const stopped = manager.abort(r.id);
           if (stopped) {
             agentActivity.delete(r.id);
-            widget.markFinished(r.id);
-            widget.update();
             ctx.ui.notify(`Stopped agent ${r.id}.`, "warning");
           }
           return stopped;
