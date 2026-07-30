@@ -539,12 +539,7 @@ export default function (pi: ExtensionAPI) {
         widget,
         record => viewAgentConversation(ctx, record),
         () => ctx.hasPendingMessages(),
-        async () => {
-          while (currentCtx === ctx && !ctx.isIdle()) {
-            await new Promise<void>(resolve => setTimeout(resolve, 10));
-          }
-          return currentCtx === ctx;
-        },
+        undefined,  // waitForIdle (deprecated, unused)
         async text => {
           if (currentCtx !== ctx) return false;
           pi.sendUserMessage(text, { deliverAs: "steer" });

@@ -152,6 +152,13 @@ export class AgentManager {
   ): number | undefined {
     const record = this.agents.get(id);
     if (!record || record.phase === "terminated") return undefined;
+    // Detach stale parent abort signal when re-activating an idle agent for a
+    // new generation. The spawn-time parent signal should not affect any turn
+    // after the initial one — a new steer/resume owns its own cancellation.
+    if (record.phase === "idle") {
+      try { record.parentAbortDetach?.(); } catch {}
+      record.parentAbortDetach = undefined;
+    }
     const generation = ++record.generation;
     record.resultConsumed = false;
     this.createTurn(record, generation);
@@ -503,10 +510,10 @@ export class AgentManager {
     for (const key of this.promotionDeferred.keys()) if (key.startsWith(`${id}:`)) this.promotionDeferred.delete(key);
   }
 
-  /** Session switch cleanup: terminate and dispose every record, including idle. */
+  /** Cleanup: remove only terminated records. Idle agents (their session, result, ID) survive for resume/get_subagent_result. */
   clearCompleted(): void {
     for (const [id, r] of this.agents) {
-      if ((r.phase === "idle" || r.phase === "terminated") && !this.active.has(id)) this.removeRecord(id, r);
+      if (r.phase === "terminated" && !this.active.has(id)) this.removeRecord(id, r);
     }
   }
   hasRunning(): boolean { return [...this.agents.values()].some(r => r.phase === "working" || r.phase === "queued"); }
@@ -518,7 +525,8 @@ export class AgentManager {
     }
     return count;
   }
-  abortAll(): number { let n = 0; for (const r of [...this.agents.values()]) if (r.phase !== "terminated") { if (this.abort(r.id)) n++; } return n; }
+  /** Abort only queued or working agents; idle agents (with resumable sessions) survive. */
+  abortAll(): number { let n = 0; for (const r of [...this.agents.values()]) if (r.phase === "working" || r.phase === "queued") { if (this.abort(r.id)) n++; } return n; }
   /** Stop every generation and wait until all underlying prompt executions quiesce. */
   async terminateAll(): Promise<number> {
     const count = this.abortAll();

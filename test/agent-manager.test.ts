@@ -190,19 +190,31 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager?.dispose();
   });
 
-  it("clearCompleted removes completed records", async () => {
+  it("clearCompleted preserves idle (completed) agents; removes only terminated", async () => {
     manager = new AgentManager();
     resolvedRun();
 
-    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
-      description: "test",
+    // Completed background agent — becomes idle
+    const id1 = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "completed",
       isBackground: true,
     });
-    await manager.getRecord(id)!.promise;
+    await manager.getRecord(id1)!.promise;
+    expect(manager.getRecord(id1)!.phase).toBe("idle");
 
-    expect(manager.listAgents()).toHaveLength(1);
     manager.clearCompleted();
-    expect(manager.listAgents()).toHaveLength(0);
+
+    // Idle agent survives clearCompleted
+    expect(manager.getRecord(id1)).toBeDefined();
+    expect(manager.getRecord(id1)!.status).toBe("completed");
+
+    // Now abort — becomes terminated, then clearCompleted removes it
+    manager.abort(id1);
+    await vi.waitFor(() => {
+      expect(manager.getRecord(id1)?.phase).toBe("terminated");
+    });
+    manager.clearCompleted();
+    expect(manager.getRecord(id1)).toBeUndefined();
   });
 
   it("clearCompleted does not remove running or queued agents", async () => {
@@ -238,26 +250,41 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.abort(id2);
   });
 
-  it("clearCompleted calls dispose on sessions of removed records", async () => {
+  it("clearCompleted disposes sessions of terminated (aborted) records only", async () => {
     manager = new AgentManager();
     const disposeSpy = vi.fn();
     const sess = { dispose: disposeSpy };
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done",
-      session: sess as any,
-      aborted: false,
-      steered: false,
+    // Use hanging mock that resolves on abort so the task quiesces and cleanupRecordResources fires
+    const sessionCreated = new Promise<any>(resolve => {
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts: any) => {
+        resolve(opts.onSessionCreated);
+        return new Promise(r => {
+          opts.signal?.addEventListener("abort", () => {
+            r({ responseText: "aborted", session: sess, aborted: true, steered: false });
+          }, { once: true });
+        });
+      });
     });
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
       isBackground: true,
     });
-    await manager.getRecord(id)!.promise;
+    // Wire up the session
+    const onSessionCreated = await sessionCreated;
+    onSessionCreated(sess);
+
+    manager.abort(id);
+    await vi.waitFor(() => {
+      expect(manager.getRecord(id)?.phase).toBe("terminated");
+      expect((manager as any).active.has(id)).toBe(false);
+    });
+
+    // dispose must have been called via cleanupRecordResources during task quiesce
+    expect(disposeSpy).toHaveBeenCalledOnce();
 
     manager.clearCompleted();
-
-    expect(disposeSpy).toHaveBeenCalledOnce();
+    expect(manager.getRecord(id)).toBeUndefined();
   });
 
   it("abort() immediately aborts the session and active bash, not just the manager signal", () => {
@@ -358,7 +385,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     }
   });
 
-  it("clearCompleted removes error and stopped records", async () => {
+  it("clearCompleted preserves idle agents including error; removes only terminated", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockRejectedValue(new Error("boom"));
 
@@ -368,9 +395,220 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     });
     await manager.getRecord(id)!.promise;
     expect(manager.getRecord(id)!.status).toBe("error");
+    expect(manager.getRecord(id)!.phase).toBe("idle");
 
     manager.clearCompleted();
+    // Error agent is idle — must NOT be removed (preserves result/session for resume)
+    expect(manager.getRecord(id)).toBeDefined();
+
+    // Only explicitly terminated agents are removed
+    manager.abort(id);
+    await vi.waitFor(() => {
+      expect(manager.getRecord(id)?.phase).toBe("terminated");
+    });
+    manager.clearCompleted();
     expect(manager.getRecord(id)).toBeUndefined();
+  });
+});
+
+// RED: Regression — idle agents must survive abortAll and clearCompleted
+describe("AgentManager — Bug fix: idle agents preserved by abortAll and clearCompleted", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    void manager?.dispose();
+  });
+
+  it("RED: abortAll does NOT abort idle agents (preserves session for resume)", async () => {
+    manager = new AgentManager(undefined, 1);
+    resolvedRun();
+
+    // Complete a background agent — becomes idle
+    const idleId = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", {
+      description: "idle", isBackground: true,
+    });
+    await manager.waitForGeneration(idleId, 1);
+    expect(manager.getRecord(idleId)!.phase).toBe("idle");
+
+    // Spawn a second agent that stays running
+    const hanging = hangingRunAgent();
+    const runningId = manager.spawn(mockPi, mockCtx, "general-purpose", "running", {
+      description: "running", isBackground: true,
+    });
+    expect(manager.getRecord(runningId)!.phase).toBe("working");
+
+    // abortAll must stop running but leave idle untouched
+    expect(manager.abortAll()).toBe(1);
+    expect(manager.getRecord(idleId)!.phase).toBe("idle");
+    expect(manager.getRecord(idleId)!.session).toBeDefined();
+    expect(manager.getRecord(idleId)!.result).toBe("done");
+    expect(manager.getRecord(runningId)!.phase).toBe("terminated");
+
+    hanging.release();
+    await vi.waitFor(() => expect(manager.hasRunning()).toBe(false));
+  });
+
+  it("RED: clearCompleted preserves idle agents; removes only terminated", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    // Completed background — idle
+    const idleId = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", {
+      description: "idle", isBackground: true,
+    });
+    await manager.waitForGeneration(idleId, 1);
+    expect(manager.getRecord(idleId)!.phase).toBe("idle");
+
+    // Spawn with hanging mock that resolves on abort → task settles → record leaves active
+    const hanging = hangingRunAgent();
+    const termId = manager.spawn(mockPi, mockCtx, "general-purpose", "term", {
+      description: "to-be-terminated", isBackground: true,
+    });
+    manager.abort(termId);
+    // abort triggers the abort signal → hanging runAgent resolves → task settles → active released
+    await vi.waitFor(() => {
+      expect(manager.getRecord(termId)!.phase).toBe("terminated");
+      expect((manager as any).active.has(termId)).toBe(false);
+    });
+
+    manager.clearCompleted();
+
+    // Idle agent preserved with result + session
+    expect(manager.getRecord(idleId)).toBeDefined();
+    expect(manager.getRecord(idleId)!.status).toBe("completed");
+    expect(manager.getRecord(idleId)!.result).toBe("done");
+    expect(manager.getRecord(idleId)!.session).toBeDefined();
+
+    // Terminated agent removed
+    expect(manager.getRecord(termId)).toBeUndefined();
+
+    hanging.release();
+  });
+
+  it("RED: terminateAll does not abort idle agents; idle survives session transition", async () => {
+    manager = new AgentManager(undefined, 1);
+    resolvedRun();
+
+    const idleId = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", {
+      description: "idle", isBackground: true,
+    });
+    await manager.waitForGeneration(idleId, 1);
+    expect(manager.getRecord(idleId)!.phase).toBe("idle");
+
+    const hanging = hangingRunAgent();
+    const runningId = manager.spawn(mockPi, mockCtx, "general-purpose", "running", {
+      description: "running", isBackground: true,
+    });
+    expect(manager.getRecord(runningId)!.phase).toBe("working");
+
+    // Simulate session transition: terminateAll then clearCompleted
+    await manager.terminateAll();
+    // terminateAll calls abortAll — must only stop running
+    expect(manager.getRecord(idleId)!.phase).toBe("idle");
+    expect(manager.getRecord(runningId)!.phase).toBe("terminated");
+
+    // clearCompleted after terminateAll must NOT remove idle
+    manager.clearCompleted();
+    expect(manager.getRecord(idleId)).toBeDefined();
+    expect(manager.getRecord(idleId)!.session).toBeDefined();
+    expect(manager.getRecord(runningId)).toBeUndefined();
+
+    hanging.release();
+    await vi.waitFor(() => expect(manager.hasRunning()).toBe(false));
+  });
+
+  it("RED: idle agent result and session accessible after abortAll + clearCompleted", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", {
+      description: "idle", isBackground: true,
+    });
+    await manager.waitForGeneration(id, 1);
+
+    // Simulate session transition
+    await manager.terminateAll();
+    manager.clearCompleted();
+
+    // Result and session must still be accessible
+    expect(manager.getRecord(id)).toBeDefined();
+    expect(manager.getRecord(id)!.result).toBe("done");
+    expect(manager.getRecord(id)!.session).toBeDefined();
+    expect(manager.getRecord(id)!.turnResults.get(1)?.result).toBe("done");
+  });
+
+  it("RED: old parent abort signal does not kill a resumed generation", async () => {
+    const parentSignal = new AbortController();
+
+    // Step 1: spawn background agent with parent signal, complete immediately
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", {
+      description: "gen-1", isBackground: true, signal: parentSignal.signal,
+    });
+    await manager.waitForGeneration(id, 1);
+    expect(manager.getRecord(id)!.phase).toBe("idle");
+
+    // Step 2: start a hanging resumed turn (gen 2)
+    const { resumeAgent } = await import("../src/agent-runner.js");
+    let resumeResolve!: (value: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt) => {
+      await new Promise<any>(resolve => { resumeResolve = resolve; });
+      return { responseText: "resumed result", aborted: false, steered: false, cancelled: false };
+    });
+
+    const gen2 = manager.enqueueTurn(id, "second")!;
+    await vi.waitFor(() => {
+      expect(manager.getRecord(id)?.phase).toBe("working");
+    });
+
+    // Step 3: abort the OLD parent signal — must NOT affect gen 2
+    // (fix: enqueueTurn detaches stale parent signal at idle→active boundary)
+    parentSignal.abort();
+
+    // Agent still working — old signal detached when enqueueTurn transitioned from idle
+    expect(manager.getRecord(id)!.phase).toBe("working");
+
+    // Step 4: complete gen 2 and verify result via getTurnResult
+    resumeResolve!({ responseText: "resumed result", aborted: false, steered: false, cancelled: false });
+    await manager.waitForGeneration(id, gen2);
+
+    expect(manager.getTurnResult(id, gen2)?.status).toBe("completed");
+    expect(manager.getTurnResult(id, gen2)?.result).toBe("resumed result");
+  });
+
+  it("RED: parent abort signal while idle consumes generation (Escape-after-completion)", async () => {
+    const parentSignal = new AbortController();
+
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "escape-after-completion", isBackground: true, signal: parentSignal.signal,
+    });
+    await manager.waitForGeneration(id, 1);
+    expect(manager.getRecord(id)!.phase).toBe("idle");
+    expect(manager.getRecord(id)!.resultConsumed).toBeFalsy();
+
+    // Fire parent signal while idle — stop handler consumes generation (suppresses notification)
+    parentSignal.abort();
+
+    // Generation consumed, parent signal detached
+    expect(manager.getRecord(id)!.resultConsumed).toBe(true);
+    expect(manager.getRecord(id)!.phase).toBe("idle");
+
+    // Still accessible for get_subagent_result but consume flag is set
+    expect(manager.getRecord(id)!.result).toBe("done");
+
+    // Verify a resumed turn still works (stale parent already detached)
+    const { resumeAgent } = await import("../src/agent-runner.js");
+    vi.mocked(resumeAgent).mockResolvedValue({
+      responseText: "after-escape", aborted: false, steered: false, cancelled: false,
+    });
+    const gen2 = await manager.resume(id, "continue");
+    expect(gen2?.status).toBe("completed");
+    expect(gen2?.result).toBe("after-escape");
   });
 });
 
@@ -607,7 +845,7 @@ describe("AgentManager — promoteActiveToBackground", () => {
       expect(manager.listAgents().length).toBe(1);
     });
 
-    // Build a mock base editor with onEscape that aborts parent signal and restores text
+    // Build a mock base editor with dequeue action handler that restores text
     let baseText = "draft";
     const base: any = {
       render: vi.fn(() => []),
@@ -615,12 +853,10 @@ describe("AgentManager — promoteActiveToBackground", () => {
       getText: vi.fn(() => baseText),
       setText: vi.fn((t: string) => { baseText = t; }),
       handleInput: vi.fn(),
-      onEscape: vi.fn(() => {
-        // Abort the parent signal (simulating parent turn being interrupted)
-        parentSignal.abort();
-        // Restore queued text into the editor
+      actionHandlers: new Map([["dequeue", vi.fn(() => {
+        // Restore queued text into the editor (no abort)
         baseText = "queued";
-      }),
+      })]]),
     };
 
     // Mock AgentWidget with minimal interface
@@ -641,12 +877,11 @@ describe("AgentManager — promoteActiveToBackground", () => {
 
     // Prevent submit from hanging
     const submit = vi.fn(() => true);
-    const waitForIdle = vi.fn(async () => true);
 
     const editor = new AgentNavigationEditor(
       base, widget, vi.fn(),
       () => true, // hasPendingMessages
-      waitForIdle,
+      undefined,  // waitForIdle (deprecated, unused)
       submit,
       promoteForeground,
     );
@@ -654,9 +889,9 @@ describe("AgentManager — promoteActiveToBackground", () => {
     // Act: press Ctrl+B
     editor.handleInput("\u0002");
 
-    // Assert: promoteForeground was called, onEscape was called
+    // Assert: promoteForeground was called, dequeue was called
     expect(promoteForeground).toBeDefined();
-    expect(base.onEscape).toHaveBeenCalledOnce();
+    expect(base.actionHandlers.get("dequeue")).toHaveBeenCalledOnce();
 
     // spawnAndWait returns tagged backgrounded
     const result = await spawnPromise;
@@ -664,10 +899,10 @@ describe("AgentManager — promoteActiveToBackground", () => {
     expect(result.generation).toBe(1);
     expect(result.record.session).toBe(session);
 
-    // Child session NOT aborted by parent signal (parent was aborted inside onEscape,
-    // but detach happened first)
+    // Child session NOT aborted — Ctrl+B no longer aborts anything
     expect(session.abortBash).not.toHaveBeenCalled();
     expect(session.abort).not.toHaveBeenCalled();
+    expect(parentSignal.signal.aborted).toBe(false);
     expect(manager.getRecord(result.record.id)!.status).toBe("running");
 
     // Now release the agent and verify completion
@@ -1038,6 +1273,12 @@ describe("AgentManager — reusable FIFO generations", () => {
     resolvedRun();
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "first", { description: "cleanup", isBackground: true });
     await manager.waitForGeneration(id, 1);
+    // Must terminate before clearCompleted removes it
+    manager.abort(id);
+    await vi.waitFor(() => {
+      expect(manager.getRecord(id)!.phase).toBe("terminated");
+      expect((manager as any).active.has(id)).toBe(false);
+    });
     manager.clearCompleted();
 
     expect(manager.getTurnResult(id, 1)).toBeUndefined();

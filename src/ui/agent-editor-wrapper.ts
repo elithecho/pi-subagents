@@ -16,9 +16,16 @@ export class AgentNavigationEditor implements EditorComponent {
     private widget: AgentWidget,
     private openAgent: (record: AgentRecord) => Promise<void>,
     private hasPendingMessages: () => boolean = () => false,
-    private waitForIdle: () => Promise<boolean> = async () => true,
+    /** @deprecated Unused — Ctrl+B no longer waits for idle. Kept for API compatibility only (no field created). */
+    _waitForIdle: () => Promise<boolean> = async () => true,
+    /**
+     * Fire-and-forget submit callback. pi.sendUserMessage returns void (no async ack),
+     * so the only acceptance signals are: synchronous return `true` (call was issued)
+     * or synchronous throw (message not queued). Return `false` to skip clearing the
+     * editor and leave restored text visible for retry.
+     */
     private submitRestoredMessage: (text: string) => boolean | Promise<boolean> = () => false,
-    /** Callback to promote the running foreground agent to background before Escape. */
+    /** Callback to promote the running foreground agent to background before Ctrl+B. */
     private promoteForegroundAgent?: () => boolean,
   ) {}
 
@@ -77,9 +84,9 @@ export class AgentNavigationEditor implements EditorComponent {
     if (matchesKey(data, "ctrl+b")) {
       if (this.ctrlBTransitionActive) return;
       if (this.hasPendingMessages()) {
-        const onEscape = this.onEscape;
-        if (typeof onEscape === "function") {
-          // Promote before Escape: if no eligible foreground agent or
+        const dequeueHandler = this.actionHandlers?.get?.('dequeue');
+        if (typeof dequeueHandler === "function") {
+          // Promote before dequeue: if no eligible foreground agent or
           // promotion throws, delegate Ctrl+B unchanged (fail-closed).
           let promoted = false;
           try {
@@ -96,7 +103,7 @@ export class AgentNavigationEditor implements EditorComponent {
           }
           this.leaveList();
           this.ctrlBTransitionActive = true;
-          void this.interruptAndSubmitRestored(onEscape);
+          void this.dequeueAndSubmit(dequeueHandler);
           return;
         }
       }
@@ -136,15 +143,12 @@ export class AgentNavigationEditor implements EditorComponent {
     this.base.handleInput(data);
   }
 
-  private async interruptAndSubmitRestored(onEscape: () => void): Promise<void> {
+  private async dequeueAndSubmit(dequeueHandler: () => void): Promise<void> {
     try {
       const before = this.base.getText();
-      onEscape();
+      dequeueHandler();
       const restored = this.base.getText();
       if (restored.trim() === "" || restored === before) return;
-
-      const active = await this.waitForIdle();
-      if (!active || this.base.getText() !== restored) return;
 
       const submitted = await this.submitRestoredMessage(restored);
       if (submitted && this.base.getText() === restored) this.base.setText("");
@@ -167,12 +171,13 @@ export function wrapEditorFactory(
   widget: AgentWidget,
   openAgent: (record: AgentRecord) => Promise<void>,
   hasPendingMessages: () => boolean = () => false,
-  waitForIdle: () => Promise<boolean> = async () => true,
+  /** @deprecated Unused — Ctrl+B no longer waits for idle. Kept for API compatibility only. */
+  _waitForIdle: () => Promise<boolean> = async () => true,
   submitRestoredMessage: (text: string) => boolean | Promise<boolean> = () => false,
   promoteForegroundAgent?: () => boolean,
 ): EditorFactory {
   return (tui, theme, keybindings) => {
     const base = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
-    return new AgentNavigationEditor(base, widget, openAgent, hasPendingMessages, waitForIdle, submitRestoredMessage, promoteForegroundAgent);
+    return new AgentNavigationEditor(base, widget, openAgent, hasPendingMessages, _waitForIdle, submitRestoredMessage, promoteForegroundAgent);
   };
 }
