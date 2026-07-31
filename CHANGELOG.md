@@ -11,9 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Panic stop for runaway background agents.** Open a running agent from `/agents` and press `x` in the conversation viewer to stop that agent. Stop-all remains available from `/agents → Settings → Stop all running/queued agents`.
 
 ### Changed
+- **Migrated Pi SDK imports and peer dependencies to `@earendil-works/*`.** Pi framework peers now use the host-provided versions, matching Pi 0.83+ and avoiding a second, incompatible legacy SDK installation.
 - **Removed `max_turns` from the `Agent` tool schema** so the parent model can no longer choose ad hoc per-call turn limits. By default, subagents are unlimited; turn limits must come from agent frontmatter or subagent settings.
 
 ### Fixed
+- **Subagent results no longer regress under the legacy Pi SDK.** A recent dependency change installed deprecated `@mariozechner/pi-coding-agent` 0.49.3 alongside a current Pi host, breaking the session/result event contract and causing incorrect result payloads.
 - **Stopping an active subagent now aborts session-owned bash/tool execution immediately.** Previously stop requests marked the record as stopped but could wait for the current subagent process/tool to finish naturally before the run actually settled.
 - **`.pi/subagent-schedules/` is no longer created in every working directory.** `ScheduleStore`'s constructor previously ran `mkdirSync` unconditionally, so any session with scheduling enabled left an empty `.pi/subagent-schedules/` dir behind even when nothing was ever scheduled. Directory creation is now lazy — deferred to a new private `ensureDir()` invoked at the top of `withLock`, so the dir (and its `<sessionId>.json`) appear only when a job is actually persisted. Additionally, `update`/`remove` now short-circuit on an unknown id (in-memory `jobs.has(id)` check) before taking the lock, so no-op mutations never touch disk. Read-only use (`list`/`get`/`hasName`) and constructing the store never create the dir. Pre-existing leftover dirs are not cleaned up — remove them manually.
 

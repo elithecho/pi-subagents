@@ -1,5 +1,5 @@
-import { CustomEditor } from "@mariozechner/pi-coding-agent";
-import { type EditorComponent, type EditorTheme, isKeyRelease, matchesKey, type TUI } from "@mariozechner/pi-tui";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { type EditorComponent, type EditorTheme, isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { AgentRecord } from "../types.js";
 import type { AgentWidget } from "./agent-widget.js";
 

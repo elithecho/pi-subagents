@@ -1,7 +1,7 @@
 /** Tracks reusable child sessions and schedules every prompt turn. */
 import { randomUUID } from "node:crypto";
-import type { Model } from "@mariozechner/pi-ai";
-import type { AgentSession, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
+import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { logger } from "./logger.js";
 import type { AgentInvocation, AgentRecord, AgentTurnSnapshot, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
