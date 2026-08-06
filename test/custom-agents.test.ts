@@ -81,6 +81,7 @@ Just a prompt.`);
     expect(agent.model).toBeUndefined();
     expect(agent.thinking).toBeUndefined();
     expect(agent.maxTurns).toBeUndefined();
+    expect(agent.contextLimit).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
@@ -183,6 +184,39 @@ Negative turns.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("negturns")!.maxTurns).toBeUndefined();
+  });
+
+  it("parses context_limit frontmatter", () => {
+    writeAgent("limited", `---
+context_limit: 120000
+---
+
+Do the thing.`);
+
+    const agent = loadCustomAgents(tmpDir).get("limited")!;
+    expect(agent.contextLimit).toBe(120000);
+  });
+
+  it("accepts context_limit: 0 as unlimited", () => {
+    writeAgent("unlimited", `---
+context_limit: 0
+---
+
+Do the thing.`);
+
+    const agent = loadCustomAgents(tmpDir).get("unlimited")!;
+    expect(agent.contextLimit).toBe(0);
+  });
+
+  it("rejects negative context_limit", () => {
+    writeAgent("neglimit", `---
+context_limit: -50
+---
+
+Do the thing.`);
+
+    const agent = loadCustomAgents(tmpDir).get("neglimit")!;
+    expect(agent.contextLimit).toBeUndefined();
   });
 
   it("handles prompt_mode: append", () => {

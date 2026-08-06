@@ -18,6 +18,8 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       // builtinToolNames omitted — means "all available tools" (resolved at lookup time)
       // inheritContext / runInBackground / isolated omitted — strategy fields, callers decide per-call.
       // Setting them to false would lock callsite intent (see resolveAgentInvocationConfig in invocation-config.ts).
+      // maxTurns / contextLimit omitted — no turn or token budget by default.
+      // Custom agent files can set `context_limit` in frontmatter to cap lifetime tokens.
       extensions: true,
       skills: true,
       systemPrompt: "",

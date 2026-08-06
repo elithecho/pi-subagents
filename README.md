@@ -203,13 +203,14 @@ All fields are optional — sensible defaults for everything.
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh |
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
+| `context_limit` | unlimited | Max lifetime tokens (input + output + cacheWrite) before the agent is forced to wrap up. When crossed, a loud steering message tells the agent to stop, end its turn, and report back with whatever it has. `0` or omit for unlimited |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
 | `isolated` | `false` | No extension/MCP tools, only built-in |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
+Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `context_limit`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
 
 ## Tools
 

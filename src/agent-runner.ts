@@ -35,6 +35,22 @@ export function normalizeMaxTurns(n: number | undefined): number | undefined {
   return Math.max(1, n);
 }
 
+/**
+ * Normalize a context limit (max lifetime tokens). undefined or 0 = unlimited,
+ * otherwise minimum 1.
+ */
+export function normalizeContextLimit(n: number | undefined): number | undefined {
+  if (n == null || n === 0) return undefined;
+  return Math.max(1, n);
+}
+
+/** Loud steering message used to force a wrap-up when the context limit is hit. */
+const CONTEXT_LIMIT_STEER_MESSAGE = (limit: number): string =>
+  `⚠️ CONTEXT LIMIT REACHED — you have consumed your configured context limit of ${limit.toLocaleString()} tokens. ` +
+  `You MUST STOP NOW: do not make any further tool calls, do not keep investigating, and do not continue working. ` +
+  `End your turn immediately and report back to your caller — summarize what you completed, include any partial ` +
+  `results or findings, and state clearly that you stopped because you ran out of context (limit ${limit.toLocaleString()} tokens).`;
+
 /** Get the default max turns value. undefined = unlimited. */
 export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurns; }
 /** Set the default max turns value. undefined or 0 = unlimited, otherwise minimum 1. */
@@ -125,6 +141,8 @@ export interface RunResult {
   aborted: boolean;
   /** True if the agent was steered to wrap up (hit soft turn limit) but finished in time. */
   steered: boolean;
+  /** True if the agent was steered to wrap up because it hit its context limit. */
+  contextLimited: boolean;
 }
 
 /**
@@ -327,22 +345,34 @@ export async function runAgent(
 
   options.onSessionCreated?.(session);
 
-  // Track turns for graceful max_turns enforcement
+  // Track turns for graceful max_turns enforcement and lifetime tokens for
+  // the optional context limit (max lifetime token budget).
   let turnCount = 0;
   const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
-  let softLimitReached = false;
+  const contextLimit = normalizeContextLimit(agentConfig?.contextLimit);
+  let turnSoftLimitReached = false;
+  let contextLimitReached = false;
   let aborted = false;
+  let lifetimeTokens = 0;
 
   let currentMessageText = "";
   const unsubTurns = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") {
       turnCount++;
       options.onTurnEnd?.(turnCount);
+      // Context budget: once lifetime tokens cross the limit, steer once with
+      // a loud wrap-up message. Delivered before the agent's next LLM call, so
+      // it stops and reports back (partial results intact) instead of burning
+      // more tokens. Never hard-aborts — that would lose work.
+      if (contextLimit != null && !contextLimitReached && lifetimeTokens >= contextLimit) {
+        contextLimitReached = true;
+        session.steer(CONTEXT_LIMIT_STEER_MESSAGE(contextLimit));
+      }
       if (maxTurns != null) {
-        if (!softLimitReached && turnCount >= maxTurns) {
-          softLimitReached = true;
+        if (!turnSoftLimitReached && turnCount >= maxTurns) {
+          turnSoftLimitReached = true;
           session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
+        } else if (turnSoftLimitReached && turnCount >= maxTurns + graceTurns) {
           aborted = true;
           session.abort();
         }
@@ -363,11 +393,15 @@ export async function runAgent(
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
-      if (u) options.onAssistantUsage?.({
-        input: u.input ?? 0,
-        output: u.output ?? 0,
-        cacheWrite: u.cacheWrite ?? 0,
-      });
+      if (u) {
+        const delta = {
+          input: u.input ?? 0,
+          output: u.output ?? 0,
+          cacheWrite: u.cacheWrite ?? 0,
+        };
+        lifetimeTokens += delta.input + delta.output + delta.cacheWrite;
+        options.onAssistantUsage?.(delta);
+      }
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
@@ -395,7 +429,7 @@ export async function runAgent(
   }
 
   const responseText = collector.getText().trim() || getLastAssistantText(session);
-  return { responseText, session, aborted, steered: softLimitReached };
+  return { responseText, session, aborted, steered: turnSoftLimitReached || contextLimitReached, contextLimited: contextLimitReached };
 }
 
 /**
@@ -405,6 +439,8 @@ export interface ResumeResult {
   responseText: string;
   aborted: boolean;
   steered: boolean;
+  /** True if the agent was steered to wrap up because it hit its context limit. */
+  contextLimited: boolean;
   cancelled: boolean;
 }
 
@@ -418,15 +454,22 @@ export async function resumeAgent(
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     maxTurns?: number;
+    /** Max lifetime tokens. undefined/0 = unlimited. */
+    contextLimit?: number;
+    /** Tokens already consumed before this resume (keeps the budget lifetime-scoped). */
+    lifetimeTokens?: number;
     signal?: AbortSignal;
   } = {},
 ): Promise<ResumeResult> {
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
   const maxTurns = normalizeMaxTurns(options.maxTurns);
+  const contextLimit = normalizeContextLimit(options.contextLimit);
   let turnCount = 0;
-  let softLimitReached = false;
+  let turnSoftLimitReached = false;
+  let contextLimitReached = false;
   let aborted = false;
+  let lifetimeTokens = options.lifetimeTokens ?? 0;
   let cancelled = options.signal?.aborted === true;
   const markCancelled = () => { cancelled = true; };
   options.signal?.addEventListener("abort", markCancelled, { once: true });
@@ -436,11 +479,17 @@ export async function resumeAgent(
     if (event.type === "turn_end") {
       turnCount++;
       options.onTurnEnd?.(turnCount);
+      // Context budget: once lifetime tokens cross the limit, steer once with
+      // a loud wrap-up message. Never hard-aborts — that would lose work.
+      if (contextLimit != null && !contextLimitReached && lifetimeTokens >= contextLimit) {
+        contextLimitReached = true;
+        void session.steer(CONTEXT_LIMIT_STEER_MESSAGE(contextLimit));
+      }
       if (maxTurns != null) {
-        if (!softLimitReached && turnCount >= maxTurns) {
-          softLimitReached = true;
+        if (!turnSoftLimitReached && turnCount >= maxTurns) {
+          turnSoftLimitReached = true;
           void session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
+        } else if (turnSoftLimitReached && turnCount >= maxTurns + graceTurns) {
           aborted = true;
           void session.abort();
         }
@@ -455,11 +504,15 @@ export async function resumeAgent(
     if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
-      if (u) options.onAssistantUsage?.({
-        input: u.input ?? 0,
-        output: u.output ?? 0,
-        cacheWrite: u.cacheWrite ?? 0,
-      });
+      if (u) {
+        const delta = {
+          input: u.input ?? 0,
+          output: u.output ?? 0,
+          cacheWrite: u.cacheWrite ?? 0,
+        };
+        lifetimeTokens += delta.input + delta.output + delta.cacheWrite;
+        options.onAssistantUsage?.(delta);
+      }
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
@@ -483,7 +536,8 @@ export async function resumeAgent(
     // A cancelled prompt owns no response. Never reuse the previous assistant turn.
     responseText: cancelled ? "" : collector.getText().trim() || getLastAssistantText(session),
     aborted,
-    steered: softLimitReached,
+    steered: turnSoftLimitReached || contextLimitReached,
+    contextLimited: contextLimitReached,
     cancelled,
   };
 }

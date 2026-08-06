@@ -61,6 +61,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       model: str(fm.model),
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
       maxTurns: nonNegativeInt(fm.max_turns),
+      contextLimit: nonNegativeInt(fm.context_limit),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,

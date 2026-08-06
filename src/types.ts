@@ -35,6 +35,12 @@ export interface AgentConfig {
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
+  /**
+   * Max lifetime tokens (input + output + cacheWrite) before the agent is
+   * forced to wrap up. undefined or 0 = unlimited. When crossed, a loud
+   * steering message tells the agent to end its turn and report back.
+   */
+  contextLimit?: number;
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */

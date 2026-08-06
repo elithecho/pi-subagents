@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import { logger } from "./logger.js";
 import type { AgentInvocation, AgentRecord, AgentTurnSnapshot, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
-import { addUsage } from "./usage.js";
+import { addUsage, getLifetimeTotal } from "./usage.js";
 import { checkpointWorktree, cleanupWorktree, createWorktree, pruneWorktrees } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord, turn: AgentTurnSnapshot) => void;
@@ -278,7 +279,15 @@ export class AgentManager {
           onSessionCreated: (session) => { record.session = session; runtime.options.onSessionCreated?.(session); },
         }).then(r => { record.session = r.session; return { text: r.responseText, status: r.aborted ? "aborted" as const : r.steered ? "steered" as const : "completed" as const }; })
       : record.session
-        ? resumeAgent(record.session, item.prompt, { ...callbacks, maxTurns: runtime.options.maxTurns, signal: item.signal })
+        ? resumeAgent(record.session, item.prompt, {
+            ...callbacks,
+            maxTurns: runtime.options.maxTurns,
+            // Context limit is an agent-file property, enforced per turn. The
+            // lifetime budget spans resumes: start from tokens already consumed.
+            contextLimit: getAgentConfig(runtime.type)?.contextLimit,
+            lifetimeTokens: getLifetimeTotal(record.lifetimeUsage),
+            signal: item.signal,
+          })
             .then(r => ({ text: r.cancelled ? "" : r.responseText, status: r.cancelled ? "stopped" as const : r.aborted ? "aborted" as const : r.steered ? "steered" as const : "completed" as const }))
         : Promise.reject(new Error("Agent session is not ready"));
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
@@ -72,6 +72,7 @@ vi.mock("../src/skill-loader.js", () => ({
 }));
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { getAgentConfig } from "../src/agent-types.js";
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
@@ -184,7 +185,7 @@ describe("agent-runner final output capture", () => {
 
     const result = await resumeAgent(session as any, "Continue");
 
-    expect(result).toEqual({ responseText: "RESUMED", aborted: false, steered: false, cancelled: false });
+    expect(result).toEqual({ responseText: "RESUMED", aborted: false, steered: false, contextLimited: false, cancelled: false });
   });
 
   it("forwards an already-aborted signal before prompting a resumed session", async () => {
@@ -331,5 +332,118 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     expect(seen).toEqual([{ reason: "threshold", tokensBefore: 12345 }]);
+  });
+});
+
+// ─── context_limit enforcement (optional max lifetime token budget) ──────
+// Agent files can set `context_limit` in frontmatter. Once lifetime tokens
+// (input + output + cacheWrite, same counter as the widget) cross the limit,
+// the runner steers once with a loud wrap-up message so the agent ends its
+// turn and reports back with its work intact. It never hard-aborts.
+describe("agent-runner context limit enforcement", () => {
+  const baseConfig = {
+    name: "Explore",
+    description: "Explore",
+    builtinToolNames: ["read"],
+    extensions: false,
+    skills: false,
+    systemPrompt: "You are Explore.",
+    promptMode: "replace",
+    inheritContext: false,
+    runInBackground: false,
+    isolated: false,
+  };
+
+  afterEach(() => {
+    vi.mocked(getAgentConfig).mockReturnValue(baseConfig);
+  });
+
+  function emitTurnEnd(listeners: Array<(e: any) => void>) {
+    for (const l of listeners) l({ type: "turn_end" });
+  }
+
+  function emitMessageEnd(listeners: Array<(e: any) => void>, usage: any) {
+    const event = { type: "message_end", message: { role: "assistant", usage } };
+    for (const l of listeners) l(event);
+  }
+
+  it("steers with a noisy wrap-up message once lifetime tokens cross the limit", async () => {
+    const { session, listeners } = createSession("WRAPPED");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValue({ ...baseConfig, contextLimit: 250 });
+
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, { input: 100, output: 100, cacheWrite: 50 }); // 250 → crossed
+      emitTurnEnd(listeners);
+      emitMessageEnd(listeners, { input: 40, output: 10, cacheWrite: 0 }); // 300 total
+      emitTurnEnd(listeners);
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "WRAPPED" }] });
+    });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(session.steer).toHaveBeenCalledTimes(1);
+    expect(session.steer).toHaveBeenCalledWith(expect.stringContaining("CONTEXT LIMIT REACHED"));
+    expect(session.steer).toHaveBeenCalledWith(expect.stringContaining("250"));
+    expect(result).toMatchObject({ steered: true, contextLimited: true, aborted: false });
+    expect(session.abort).not.toHaveBeenCalled();
+  });
+
+  it("never hard-aborts on the context limit — steers only once, keeping work intact", async () => {
+    const { session, listeners } = createSession("LATE");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValue({ ...baseConfig, contextLimit: 100 });
+
+    session.prompt = vi.fn(async () => {
+      for (let t = 1; t <= 12; t++) {
+        emitMessageEnd(listeners, { input: 50, output: 0, cacheWrite: 0 });
+        emitTurnEnd(listeners);
+      }
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "LATE" }] });
+    });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    // Limit crossed at turn 2 (100 tokens). The agent keeps working for 10
+    // more turns but is only steered once — never aborted.
+    expect(session.steer).toHaveBeenCalledTimes(1);
+    expect(session.abort).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ aborted: false, steered: true, contextLimited: true });
+  });
+
+  it("does not steer when no context limit is configured", async () => {
+    const { session, listeners } = createSession("FREE");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValue(baseConfig);
+
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, { input: 99999, output: 99999, cacheWrite: 99999 });
+      emitTurnEnd(listeners);
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "FREE" }] });
+    });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(session.steer).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ steered: false, contextLimited: false, aborted: false });
+  });
+
+  it("resumeAgent seeds lifetime tokens and enforces the limit across resumes", async () => {
+    const { session, listeners } = createSession("RESUMED-LIMIT");
+
+    session.prompt = vi.fn(async () => {
+      // 90 already consumed before this resume + 20 now = 110 ≥ 100
+      emitMessageEnd(listeners, { input: 20, output: 0, cacheWrite: 0 });
+      emitTurnEnd(listeners);
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED-LIMIT" }] });
+    });
+
+    const result = await resumeAgent(session as any, "continue", {
+      contextLimit: 100,
+      lifetimeTokens: 90,
+    });
+
+    expect(session.steer).toHaveBeenCalledWith(expect.stringContaining("CONTEXT LIMIT REACHED"));
+    expect(result).toMatchObject({ steered: true, contextLimited: true, cancelled: false });
   });
 });
